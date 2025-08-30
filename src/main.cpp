@@ -1,6 +1,7 @@
 // licensed under the University of Pennsylvania, Version 1.0 (the "License");
 // Kartik Virmani MODLAB-UPENN
 // you may not use this file except in compliance with the License.
+// ESP32-C3 → Arduino Mega (ATmega2560) port (no WiFi/UDP/WebServer)
 
 #include <Arduino.h>
 #include <esp32-hal.h>
@@ -61,15 +62,15 @@ const int TICKS_PER_WHEEL_REV = CPR * GEAR_RATIO; // 9600 ticks per wheel revolu
 
 // Turret motor specs
 const int TICKS_PER_TURRET_REV = 2704; // 13 PPR × 2 (quadrature) × 104 (gear ratio) = 2704 ticks/rev at output
-const float DEGREES_PER_TURRET_TICK = 360.0 / TICKS_PER_TURRET_REV; // Degrees per tick
+const float DEGREES_PER_TURRET_TICK = 360.0f / float(TICKS_PER_TURRET_REV); // Degrees per tick
 const float motorGearTeeth = 40.0; // Motor gear teeth
 const float outputGearTeeth = 136.0; // Output gear teeth
-const float turretGearRatio = outputGearTeeth / motorGearTeeth; // Turret gear ratio
+const float turretGearRatio = 1.0f; // Turret gear ratio
 
 // Target angle for turret in degrees
-float currentAngleT = 0.0;
-float inputTurretAngle = 0.0;  // Desired turret angle in degrees
-float targetTurretAngle = inputTurretAngle * turretGearRatio; // Target angle in degrees
+float currentAngleT = 0.0f;
+float inputTurretAngle = 0.0f;  // Desired turret angle in degrees
+float targetTurretAngle = 0.0f; // Target angle in degrees
 
 // PID constants for turret control
 const float Kp_turret = 18.0;
@@ -625,7 +626,7 @@ void loop() {
     
     if (useUart) {
       // UART cmd is platform angular velocity [rad/s]
-      const float target_rpm_T_platform = wheel_rpm_from_cmd(uart_turret_cmd) * (60.0f / (2.0f * (float)M_PI));
+      const float target_rpm_T_platform = wheel_rpm_from_cmd(uart_turret_cmd);
 
       // Simple PI on platform velocity
       static float integTv = 0.0f;
