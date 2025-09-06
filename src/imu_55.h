@@ -6,6 +6,7 @@
 #include <Preferences.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
+#include <Adafruit_BNO08x.h>
 
 class IMU55 {
 public:

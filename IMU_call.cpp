@@ -351,3 +351,157 @@ void loop() {
   
   delay(100);
 }
+
+
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_BNO08x.h>
+
+static const uint8_t SDA_PIN = 4;
+static const uint8_t SCL_PIN = 5;
+static const uint32_t I2C_HZ = 100000;
+
+Adafruit_BNO08x bno08x;                 // I2C instance
+static const uint8_t BNO08X_ADDR_PRIMARY   = 0x4B;
+static const uint8_t BNO08X_ADDR_SECONDARY = 0x4A;
+
+static const sh2_SensorId_t ORI_REPORT = SH2_ROTATION_VECTOR;
+static const uint16_t SAMPLE_MS = 100;
+
+static void quatToYPR(float qr, float qi, float qj, float qk,
+                      float &yaw, float &pitch, float &roll) {
+  // yaw (Z), pitch (Y), roll (X)
+  float ysqr = qj * qj;
+
+  // roll (x-axis rotation)
+  float t0 = +2.0f * (qr * qi + qj * qk);
+  float t1 = +1.0f - 2.0f * (qi * qi + ysqr);
+  roll = atan2f(t0, t1);
+
+  // pitch (y-axis rotation)
+  float t2 = +2.0f * (qr * qj - qk * qi);
+  t2 = t2 > 1.0f ? 1.0f : t2;
+  t2 = t2 < -1.0f ? -1.0f : t2;
+  pitch = asinf(t2);
+
+  // yaw (z-axis rotation)
+  float t3 = +2.0f * (qr * qk + qi * qj);
+  float t4 = +1.0f - 2.0f * (ysqr + qk * qk);
+  yaw = atan2f(t3, t4);
+
+  // radians -> degrees
+  const float RAD2DEG = 57.2957795f;
+  yaw   *= RAD2DEG;
+  pitch *= RAD2DEG;
+  roll  *= RAD2DEG;
+}
+
+static void i2c_init(int sda, int scl) {
+  pinMode(sda, INPUT_PULLUP);
+  pinMode(scl, INPUT_PULLUP);
+  delay(2);
+  if (digitalRead(sda) == LOW) {
+    pinMode(scl, OUTPUT);
+    for (int i = 0; i < 9; ++i) {
+      digitalWrite(scl, LOW);  delayMicroseconds(5);
+      digitalWrite(scl, HIGH); delayMicroseconds(5);
+    }
+    // STOP
+    pinMode(sda, OUTPUT);
+    digitalWrite(sda, LOW);    delayMicroseconds(5);
+    digitalWrite(scl, HIGH);   delayMicroseconds(5);
+    digitalWrite(sda, HIGH);   delayMicroseconds(5);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) {}
+
+  Serial.println("BNO085 orientation demo (ESP32-S2, I2C)");
+  i2c_init(SDA_PIN, SCL_PIN);
+  Wire.begin(SDA_PIN, SCL_PIN, I2C_HZ);
+  Wire.setTimeOut(50);
+  delay(100); 
+
+  bool ok = bno08x.begin_I2C(BNO08X_ADDR_PRIMARY, &Wire);
+  if (!ok) {
+    Serial.println("Primary addr 0x4B not found; trying 0x4A...");
+    ok = bno08x.begin_I2C(BNO08X_ADDR_SECONDARY, &Wire);
+  }
+  if (!ok) {
+    Serial.println("No BNO08x detected on I2C (0x4B/0x4A). Check wiring/power.");
+    while (1) delay(1000);
+  }
+  Serial.println("BNO08x found.");
+
+  if (!bno08x.enableReport(ORI_REPORT, 10000)) { 
+    Serial.println("Failed to enable rotation vector report!");
+    while (1) delay(1000);
+  }
+  Serial.println("Rotation Vector report enabled.");
+}
+
+void loop() {
+  sh2_SensorValue_t val;
+  bool got = false;
+
+  while (bno08x.getSensorEvent(&val)) {
+    if (val.sensorId == ORI_REPORT) {
+      got = true;
+
+      float qi   = val.un.rotationVector.i;
+      float qj   = val.un.rotationVector.j;
+      float qk   = val.un.rotationVector.k;
+      float qr   = val.un.rotationVector.real;
+      float acc  = val.un.rotationVector.accuracy; 
+
+      float yaw, pitch, roll;
+      quatToYPR(qr, qi, qj, qk, yaw, pitch, roll);
+
+      Serial.print("Roll: ");  Serial.print(roll, 2);   Serial.print("°  |  ");
+      Serial.print("Pitch: "); Serial.print(pitch, 2);  Serial.print("°  |  ");
+      Serial.print("Yaw: ");   Serial.print(yaw, 2);    Serial.print("°  |  ");
+      Serial.print("Acc(rad): "); Serial.println(acc, 3);
+    }
+  }
+
+  if (!got) {
+    Serial.println("No data");
+  }
+
+  delay(SAMPLE_MS);
+}
+
+
+#include <Arduino.h>
+#include "imu_85.h"
+
+IMU_85 sense;
+
+static const uint16_t SAMPLE_MS = 100;
+
+void setup() {
+    Serial.begin(115200);
+    while (!Serial) {}
+    if (!sense.begin()) {
+        Serial.println("Failed to initialize IMU!");
+        while (1) delay(1000);
+    }
+    Serial.println("IMU ready!");
+}
+
+void loop() {
+    float roll, pitch, yaw, accuracy;
+    if (sense.readOrientation(roll, pitch, yaw, accuracy)) {
+        Serial.print("Roll: "); Serial.print(roll, 2); Serial.print("° | ");
+        Serial.print("Pitch: "); Serial.print(pitch, 2); Serial.print("° | ");
+        Serial.print("Yaw: "); Serial.print(yaw, 2); Serial.print("° | ");
+        Serial.print("Acc(rad): "); Serial.println(accuracy, 3);
+    } else {
+        Serial.println("No data");
+    }
+    
+    delay(SAMPLE_MS);
+}

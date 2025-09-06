@@ -1,3 +1,4 @@
+
 // licensed under the University of Pennsylvania, Version 1.0 (the "License");
 // Kartik Virmani MODLAB-UPENN
 // you may not use this file except in compliance with the License.
@@ -12,11 +13,12 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
+#include <Adafruit_BNO08x.h>
 #include "odometry.h"
 #include <string.h>
 #include "pid_webpage.h"
 #include "imu_55.h"
-
+#include "imu_85.h"
 
 WebServer server(80);
 
