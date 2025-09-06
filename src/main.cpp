@@ -15,12 +15,18 @@
 #include "odometry.h"
 #include <string.h>
 #include "pid_webpage.h"
+#include "imu_55.h"
+
 
 WebServer server(80);
 
 // WIFI CREDENTIALS
 const char* ssid = "HAMR";
 const char* password = "123571113";
+
+//------------IMU OBJECT--------------
+IMU55 sens;                 // SDA=4, SCL=5, addr=0x28 by default
+float roll_b,pitch_b,yaw_b;
 
 //---------------------------GLOBALS----------------------
 // UDP SETUP
@@ -291,6 +297,7 @@ void setup() {
   IPAddress myIP = WiFi.softAPIP();
   Serial.print("ESP IP: ");
   Serial.println(myIP);
+  
 
   //--------------------------------ESP SERVER---------------------------
   server.on("/", HTTP_GET, []() {
@@ -391,11 +398,25 @@ void setup() {
   //Serial.println("Commands: f=forward, b=backward, r=right, l=left, s=stop, +=faster, -=slower");
   Serial.println("Send joystick data like: LX:0.00 LY:0.00 RX:0.00 RY:0.00 LT:0.00 RT:0.00 A:0 B:0 X:0 Y:0");
   Serial.printf("Initial Speed PWM: %.0f\n", basePWM);
+
+  ///=========== IMU_BASE SETUP =========////
+  while (!Serial) {}
+  if (!sens.begin()) {
+    Serial.println("IMU init failed. Check wiring/address.");
+    while (1) delay(1000);
+  }
 }
 
 void loop() {
-    //-------------------------MICRO_ROS_PROTCOL-------------------------------
-    // ---- RX: parse commands (robust to CMD or CMD3) ----
+
+  //=======IMU_BASE READ=======
+    sens.update();
+    sens.getRPY(roll_b,pitch_b,yaw_b);
+    Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
+    Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
+
+  //-------------------------MICRO_ROS_PROTCOL-------------------------------
+  // ---- RX: parse commands (robust to CMD or CMD3) ----
     static uint8_t buf[64];      // big enough for CMD3 (48 bytes) + slack
     static size_t  have = 0;
 
@@ -625,7 +646,7 @@ void loop() {
     
     if (useUart) {
       // UART cmd is platform angular velocity [rad/s]
-      const float target_rpm_T_platform = wheel_rpm_from_cmd(uart_turret_cmd) * (60.0f / (2.0f * (float)M_PI));
+      const float target_rpm_T_platform = wheel_rpm_from_cmd(uart_turret_cmd);
 
       // Simple PI on platform velocity
       static float integTv = 0.0f;
@@ -704,10 +725,13 @@ void loop() {
                 " | Rot: L=" + String(rotL, 2) +
                 ", R=" + String(rotR, 2) +
                 ", T_angle=" + String(currentAngleT, 2);
-    Serial.println(status);
+    // Serial.println(status);
     // sendUDP(status);
 
   }
+
+  
+  delay(100);
 
   /////// ================= LOCALIZATION START =====================////
 
@@ -716,26 +740,29 @@ void loop() {
     updateOdometry();
     // updateSampledPoseFromLastDelta();
 
-    static unsigned long lastDetailedPrint = 0;
-    if (now - lastDetailedPrint >= 1000) { // Print every 1-second
-      Serial.println("\n PROBABILISTIC ODOM ESTIMATION:");
-      printPose();
-      // printMotionModel();
+    // static unsigned long lastDetailedPrint = 0;
+    // if (now - lastDetailedPrint >= 1000) { // Print every 1-second
+    //   Serial.println("\n PROBABILISTIC ODOM ESTIMATION:");
+    //   printPose();
+    //   // printMotionModel();
 
-      static unsigned long lastCovPrint = 0;
-      if (now - lastCovPrint >= 5000) { // Print covariance every 5 seconds
-        // printCovariance();
-        lastCovPrint = now;
-      }
+    //   static unsigned long lastCovPrint = 0;
+    //   if (now - lastCovPrint >= 5000) { // Print covariance every 5 seconds
+    //     // printCovariance();
+    //     lastCovPrint = now;
+    //   }
 
-      float sample_x, sample_y, sample_theta;
-      samplePose(sample_x, sample_y, sample_theta); 
-      // Serial.printf("Sampled Pose: X=%.2f, Y=%.2f, Theta=%.2f\n", sample_x, sample_y, sample_theta * 180.0 / PI);
-      // Serial.println("--------------------------------------------------");
-      lastDetailedPrint = now;
-    }
+    //   float sample_x, sample_y, sample_theta;
+    //   samplePose(sample_x, sample_y, sample_theta); 
+    //   // Serial.printf("Sampled Pose: X=%.2f, Y=%.2f, Theta=%.2f\n", sample_x, sample_y, sample_theta * 180.0 / PI);
+    //   // Serial.println("--------------------------------------------------");
+    //   lastDetailedPrint = now;
+    // }
     lastOdometryTime = now;
   }
 }
+
+
+
 
 

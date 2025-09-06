@@ -22,6 +22,7 @@ WebServer server(80);
 const char* ssid = "HAMR";
 const char* password = "123571113";
 
+//---------------------------GLOBALS----------------------
 // UDP SETUP
 WiFiUDP udp;
 const int port = 12345;  // Port to listen on
@@ -98,6 +99,7 @@ float errorT = 0;
 unsigned long lastPidTime = 0;
 long lastTicksL = 0;
 long lastTicksR = 0;
+long lastTicksT = 0;
 
 // Base PWM speed (0-4095)
 float basePWM = 3500;
@@ -125,6 +127,82 @@ float value = 0.0f; // Value of the button pressed
 unsigned long lastOdometryTime = 0;
 const unsigned long ODOMETRY_INTERVAL = 100; // Odometry update interval in ms
 
+// ----------------- UART Protocol -----------------
+static const uint16_t MAGIC = 0xCAFE;
+static const uint16_t VER   = 1;
+static const uint16_t TYPE_CMD  = 0x0001; // PC->ESP : left,right
+static const uint16_t TYPE_CMD3 = 0x0011; // PC->ESP : left,right,turret
+static const uint16_t TYPE_ENC  = 0x0003; // ESP->PC : encoders
+// Latest commands received over UART (ROS)
+volatile float uart_left_cmd = 0.0f;
+volatile float uart_right_cmd = 0.0f;
+volatile float uart_turret_cmd = 0.0f;
+volatile uint32_t last_uart_cmd_ms = 0;
+
+// Enc packet sequence
+static uint32_t enc_seq = 0;
+
+#pragma pack(push,1)
+struct CmdPacket {
+  uint16_t magic, ver, type;
+  uint32_t seq;
+  uint64_t t_tx_ns;
+  float left, right;
+  uint16_t crc16;
+};
+struct Cmd3Packet {
+  uint16_t magic, ver, type;
+  uint32_t seq;
+  uint64_t t_tx_ns;
+  float left, right, turret;
+  uint16_t crc16;
+};
+struct EncPacket {
+  uint16_t magic, ver, type;
+  uint32_t seq;
+  uint64_t t_tx_ns;
+  int32_t ticksL, ticksR, ticksT;
+  uint16_t crc16;
+};
+
+#pragma pack(pop)
+
+static const size_t CMD_SIZE  = sizeof(CmdPacket);   // 2-float
+static const size_t CMD3_SIZE = sizeof(Cmd3Packet);  // 3-float
+static const size_t ENC_SIZE  = sizeof(EncPacket);
+
+// CRC32->16 surrogate (must match Pi side)
+uint16_t crc16_surrogate(const uint8_t* data, size_t n) {
+  uint32_t c = 0xFFFFFFFFu;
+  for (size_t i=0;i<n;i++) {
+    c ^= data[i];
+    for (int k=0;k<8;k++) {
+      c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+    }
+  }
+  c ^= 0xFFFFFFFFu;
+  return (uint16_t)(c & 0xFFFF);
+}
+
+// ------------- Units & conversion -------------
+constexpr float WHEEL_RADIUS_M = 0.0762f;      // your wheel radius
+constexpr float MAX_WHEEL_RPM  = 30.0f;       // safety clamp (tune)
+enum WheelCmdUnits { CMD_MPS, CMD_RAD_PER_S, CMD_RPM };
+constexpr WheelCmdUnits CMD_UNITS = CMD_RAD_PER_S;   // ROS cmd units
+
+inline float wheel_rpm_from_cmd(float v) {
+  switch (CMD_UNITS) {
+    case CMD_MPS:      return v * 60.0f / (2.0f * (float)M_PI * WHEEL_RADIUS_M);
+    case CMD_RAD_PER_S:return v * 60.0f / (2.0f * (float)M_PI);
+    case CMD_RPM:
+    default:           return v;
+  }
+}
+template<typename T> inline T clamp(T x, T lo, T hi) {
+  return x < lo ? lo : (x > hi ? hi : x);
+}
+
+// ------------------------ ENCODERS------------------
 // Encoder interrupts (quadrature decoding)
 void IRAM_ATTR handleEncL() {
   bool A = digitalRead(encAL);
@@ -145,6 +223,7 @@ void IRAM_ATTR handleEncT() {
   ticksT += (A == B) ? 1 : -1; // Adjust based on your encoder wiring
 }
 
+//-----------------------------SET MOTORS---------------------
 // Set motor PWM and direction
 void setMotor(int pwmPin, int dirPin, float pwmVal, int channel) {
   pwmVal = constrain(pwmVal, -4095, 4095);
@@ -157,6 +236,7 @@ void setMotor(int pwmPin, int dirPin, float pwmVal, int channel) {
   }
 }
 
+//---------------------------UDP TRANSMISSION (IF WIFI)-------------
 void sendUDP(String msg) {
   if (remoteIP && remotePort) {
     udp.beginPacket(remoteIP, remotePort);
@@ -165,6 +245,7 @@ void sendUDP(String msg) {
   }
 }
 
+//---------------------------ODOM SET---------------------------
 void setupProbabilisticEndpoints() {
   // Endpoint to get current pose with uncertainty
   server.on("/pose", HTTP_GET, []() {
@@ -198,16 +279,20 @@ void setupProbabilisticEndpoints() {
   });
 }
 
+//-----------------------------------ESP SETUP-------------------------
 void setup() {
 
-  Serial.begin(115200);
-  Serial.println("ESP32 Ready");
+  Serial.begin(115200);   // USB CDC logs
+  Serial0.begin(460800);
+  Serial.println("ESP32 bidirectional UART Ready");
+  Serial.println("Pulling Micro-ROS");
   initOdometry(); // Initialize odometry
   WiFi.softAP(ssid, password, 4, 0, 2);
   IPAddress myIP = WiFi.softAPIP();
   Serial.print("ESP IP: ");
   Serial.println(myIP);
 
+  //--------------------------------ESP SERVER---------------------------
   server.on("/", HTTP_GET, []() {
     server.send(200, "text/html", pid_webpage);  // Serve the HTML page
   });
@@ -238,9 +323,9 @@ void setup() {
   // GET current values (already suggested)
   server.on("/getPID", HTTP_GET, []() {
     String json = "{";
-    json += "\"Kp\":" + String(Kp_L) + ",";
-    json += "\"Ki\":" + String(Ki_L) + ",";
-    json += "\"Kd\":" + String(Kd_L) + ",";
+    json += "\"Kp\":" + String(Kp_R) + ",";
+    json += "\"Ki\":" + String(Ki_R) + ",";
+    json += "\"Kd\":" + String(Kd_R) + ",";
     json += "\"Test\":" + String(test, 4); // 4 decimals for float
     json += "}";
     server.send(200, "application/json", json);
@@ -248,9 +333,9 @@ void setup() {
 
   // POST updates
   server.on("/updatePID", HTTP_POST, []() {
-    if (server.hasArg("Kp")) Kp_L = server.arg("Kp").toFloat();
-    if (server.hasArg("Ki")) Ki_L = server.arg("Ki").toFloat();
-    if (server.hasArg("Kd")) Kd_L = server.arg("Kd").toFloat();
+    if (server.hasArg("Kp")) Kp_R = server.arg("Kp").toFloat();
+    if (server.hasArg("Ki")) Ki_R = server.arg("Ki").toFloat();
+    if (server.hasArg("Kd")) Kd_R = server.arg("Kd").toFloat();
     if (server.hasArg("Test")) test = server.arg("Test").toFloat();
     String response = "Updated PID values:\nKp=" + String(Kp_L) + "\nKi=" + String(Ki_L) + "\nKd=" + String(Kd_L) +
                       "\nTest=" + String(test, 4);
@@ -265,6 +350,7 @@ void setup() {
   udp.begin(port);
   Serial.printf("Listening for UDP on port %d\n", port);
 
+  //---------------------------------PIN DEFINITIONS------------------------
   // Motor pins
   pinMode(pwmL, OUTPUT);
   pinMode(dirL, OUTPUT);
@@ -301,19 +387,83 @@ void setup() {
   lastPidTime = millis();
   lastTurretTime = millis();
 
-  Serial.println("Motor Sync Control Ready");
+  Serial.println("Low Level Control Ready");
   //Serial.println("Commands: f=forward, b=backward, r=right, l=left, s=stop, +=faster, -=slower");
   Serial.println("Send joystick data like: LX:0.00 LY:0.00 RX:0.00 RY:0.00 LT:0.00 RT:0.00 A:0 B:0 X:0 Y:0");
   Serial.printf("Initial Speed PWM: %.0f\n", basePWM);
 }
 
 void loop() {
+    //-------------------------MICRO_ROS_PROTCOL-------------------------------
+    // ---- RX: parse commands (robust to CMD or CMD3) ----
+    static uint8_t buf[64];      // big enough for CMD3 (48 bytes) + slack
+    static size_t  have = 0;
+
+    // accumulate
+    while (Serial0.available() && have < sizeof(buf)) {
+      buf[have++] = (uint8_t)Serial0.read();
+    }
+    // try to parse while we have at least a header
+    while (have >= 6) { // magic(2)+ver(2)+type(2)
+    uint16_t magic = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+    if (magic != MAGIC) {
+      // resync: drop 1 byte
+      memmove(buf, buf+1, --have);
+      continue;
+    }
+    uint16_t ver  = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+    uint16_t type = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
+
+    if (ver != VER) {
+      memmove(buf, buf+1, --have);
+      continue;
+    }
+    size_t need = (type == TYPE_CMD) ? CMD_SIZE :
+                (type == TYPE_CMD3)? CMD3_SIZE : 0;
+    if(need==0){
+      // unknown type; drop 1 byte
+      memmove(buf, buf+1, --have);
+      continue;
+    }
+    if (have < need) break; // incomplete frame
+    if (type == TYPE_CMD && need == CMD_SIZE) {
+      CmdPacket cmd; memcpy(&cmd, buf, CMD_SIZE);
+      uint16_t calc = crc16_surrogate((uint8_t*)&cmd, CMD_SIZE - 2);
+    if (calc == cmd.crc16) {
+      noInterrupts();
+      uart_left_cmd  = cmd.left;
+      uart_right_cmd = cmd.right;
+      last_uart_cmd_ms = millis();
+      interrupts();
+      // (optional) Serial.printf("UART CMD: L=%.3f R=%.3f\n", cmd.left, cmd.right);
+    }
+    memmove(buf, buf + CMD_SIZE, have - CMD_SIZE); have -= CMD_SIZE;
+  } else if (type == TYPE_CMD3 && need == CMD3_SIZE) {
+    Cmd3Packet cmd3; memcpy(&cmd3, buf, CMD3_SIZE);
+    uint16_t calc = crc16_surrogate((uint8_t*)&cmd3, CMD3_SIZE - 2);
+    if (calc == cmd3.crc16) {
+      noInterrupts();
+      uart_left_cmd   = cmd3.left;
+      uart_right_cmd  = cmd3.right;
+      uart_turret_cmd = cmd3.turret;
+      last_uart_cmd_ms = millis();
+      interrupts();
+      // (optional) Serial.printf("UART CMD3: L=%.3f R=%.3f T=%.3f\n", cmd3.left, cmd3.right, cmd3.turret);
+    }
+    memmove(buf, buf + CMD3_SIZE, have - CMD3_SIZE); have -= CMD3_SIZE;
+  } else {
+    // shouldn’t happen
+    memmove(buf, buf+1, --have);
+  }
+
+  }
 
   // Handle serial commands
   //   Read joystick data from serial
   //   if (Serial.available()) {
   //   String msg = Serial.readStringUntil('\n');}
 
+    //-----------------------TELEOP PROTOCOL------------------------------
     server.handleClient(); // Handle HTTP requests
     int len = udp.parsePacket();
     if (len > 0) {
@@ -365,15 +515,33 @@ void loop() {
     noInterrupts();
     long currentTicksL = ticksL;
     long currentTicksR = ticksR;
+    long currentTicksT = ticksT;
     interrupts();
 
     // Calculate RPM for each motor
     float rpmL = ((currentTicksL - lastTicksL) / dt) * 60.0 / TICKS_PER_WHEEL_REV;
     float rpmR = ((currentTicksR - lastTicksR) / dt) * 60.0 / TICKS_PER_WHEEL_REV;
+    float rpmT = ((currentTicksT - lastTicksT) / dt) * 60.0 / TICKS_PER_TURRET_REV;
+    float rpmT_platform = rpmT * turretGearRatio; // Platform RPM
 
     lastTicksL = currentTicksL;
     lastTicksR = currentTicksR;
     lastPidTime = now;
+
+    // Calculate ticks and send to Micro ROS Bridge to Publish 
+    static uint32_t last_tx_ms = 0;
+    if (millis() - last_tx_ms >= 10) {
+      last_tx_ms = millis();
+
+      EncPacket enc;
+      enc.magic = MAGIC; enc.ver = VER; enc.type = TYPE_ENC;
+      enc.seq = ++enc_seq;
+      enc.t_tx_ns = (uint64_t)micros() * 1000ull;
+      noInterrupts(); enc.ticksL = ticksL; enc.ticksR = ticksR; enc.ticksT = ticksT; interrupts();
+      enc.crc16 = crc16_surrogate((uint8_t*)&enc, ENC_SIZE - 2);
+
+      Serial0.write((uint8_t*)&enc, ENC_SIZE); // binary out on the data UART
+    }
 
     // Joystick-based differential drive control:
     // Negative ly because joystick up may be negative, adjust if needed
@@ -386,18 +554,37 @@ void loop() {
     // float turn = joyX;     // Left/right control from joystick
 
     bool useUdp = (millis() - lastUdpTime < 100);
+    bool useUart = (millis() - last_uart_cmd_ms < 150);
+
+    float rpmTargetL = 0.0f, rpmTargetR = 0.0f;
+    float pwmFF_L = 0.0f, pwmFF_R = 0.0f;
+    
+    if (useUart) {
+      // Convert ROS cmd vel -> wheel RPM, then clamp to your controller’s max
+      float Lrpm = clamp(wheel_rpm_from_cmd(uart_left_cmd),  -MAX_RPM_CMD,  MAX_RPM_CMD);
+      float Rrpm = clamp(wheel_rpm_from_cmd(uart_right_cmd), -MAX_RPM_CMD,  MAX_RPM_CMD);
+      rpmTargetL = Lrpm;
+      rpmTargetR = Rrpm;
+
+      // Keep your existing FF style: scale basePWM by the normalized target
+      pwmFF_L = basePWM * (rpmTargetL / MAX_RPM_CMD);
+      pwmFF_R = basePWM * (rpmTargetR / MAX_RPM_CMD);
+
+    }
+    else{
     float forward = useUdp ? ly : joyY;
     float turn = useUdp ? rx : joyX;
 
-    forward = 0.8f;
+    forward *= 0.8f;
     turn    *= 0.8f;
 
     // Combine for left and right motor base PWM
-    float rpmTargetL = (forward + turn) * MAX_RPM_CMD;
-    float rpmTargetR = (forward - turn) * MAX_RPM_CMD;
+    rpmTargetL = (forward + turn) * MAX_RPM_CMD;
+    rpmTargetR = (forward - turn) * MAX_RPM_CMD;
 
-    float pwmFF_L = (forward + turn) * basePWM;
-    float pwmFF_R = (forward - turn) * basePWM;
+    pwmFF_L = (forward + turn) * basePWM;
+    pwmFF_R = (forward - turn) * basePWM;
+    }
 
     // Calculate error in motord
     float errL = rpmTargetL - rpmL;
@@ -420,8 +607,8 @@ void loop() {
     float deltaPWM_R = Kp_R * errR + Ki_R * integralR + Kd_R * dErrR;
 
     // 4) Final PWM = feed-forward + PID correction, with saturation & deadband
-    pwmL_out = constrain(rpmTargetL + deltaPWM_L, -maxPWM_D, maxPWM_D);
-    pwmR_out = constrain(rpmTargetR + deltaPWM_R, -maxPWM_D, maxPWM_D);
+    pwmL_out = constrain(pwmFF_L + deltaPWM_L, -maxPWM_D, maxPWM_D);
+    pwmR_out = constrain(pwmFF_R + deltaPWM_R, -maxPWM_D, maxPWM_D);
 
     if (fabsf(pwmL_out) < minPWM) pwmL_out = 0.0f;
     if (fabsf(pwmR_out) < minPWM) pwmR_out = 0.0f;
@@ -436,7 +623,28 @@ void loop() {
     }
     setMotor(pwmT, dirT, pwmT_out, 2);
     
-    if (lt > 0.1 || rt > 0.1){
+    if (useUart) {
+      // UART cmd is platform angular velocity [rad/s]
+      const float target_rpm_T_platform = wheel_rpm_from_cmd(uart_turret_cmd);
+
+      // Simple PI on platform velocity
+      static float integTv = 0.0f;
+      const float KpTv = 120.0f;   // tune
+      const float KiTv = 20.0f;    // tune
+
+      float errTv = target_rpm_T_platform - rpmT_platform;
+      integTv += errTv * dt;
+      integTv = constrain(integTv, -100.0f, 100.0f);
+
+      float pwm_cmd = KpTv * errTv + KiTv * integTv;
+      pwmT_out = constrain(pwm_cmd, -maxPWM, maxPWM);
+      if (fabsf(pwmT_out) < 400.0f) pwmT_out = 0.0f;
+
+      // Angle reporting for status (platform degrees):
+      currentAngleT = (ticksT * DEGREES_PER_TURRET_TICK) / turretGearRatio;
+      currentAngleT = fmodf(currentAngleT, 360.0f);
+    }
+    if (lt > 0.1f || rt > 0.1f){
     // Simple turret control based on triggers
       targetTurretAngle = 0.0;
       float turretSpeed = (lt > 0.1) ? -lt * maxPWM : rt * maxPWM;
@@ -444,7 +652,7 @@ void loop() {
       currentAngleT = ticksT * DEGREES_PER_TURRET_TICK; // Calculate turret angle in degrees
       currentAngleT = fmod(currentAngleT/turretGearRatio, 360.0);
     }
-    else if (abs(targetTurretAngle)) {
+    else if (fabs(targetTurretAngle)>0.0f) {
       // Turret PID control
       // Read turret encoder counts atomically
       noInterrupts();
