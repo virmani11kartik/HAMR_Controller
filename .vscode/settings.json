@@ -1,6 +1,7 @@
 {
     "idf.pythonInstallPath": "/usr/bin/python",
     "files.associations": {
-        "cmath": "cpp"
+        "cmath": "cpp",
+        "any": "cpp"
     }
 }
