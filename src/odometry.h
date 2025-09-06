@@ -4,24 +4,30 @@
 #include <esp32-hal.h>
 #include <esp32-hal-gpio.h>
 #include <esp32-hal-ledc.h>
+#include <WiFi.h>   
+#include <WiFiUdp.h>
+#include <stdint.h>
 
 extern const int CPR;
 extern const int GEAR_RATIO;
 extern const int TICKS_PER_WHEEL_REV;
 extern volatile long ticksL;
 extern volatile long ticksR;
+extern WiFiUDP udp;
+extern IPAddress remoteIP;
+extern unsigned int remotePort;
 
 // Configurable parameters - matched to your main code
-const float WHEEL_RADIUS = 0.0;             // meters
-const float WHEEL_BASE = 0.0;               // meters between wheels
+const float WHEEL_RADIUS = 0.0762;             // meters
+const float WHEEL_BASE = 0.297;               // meters between wheels
 
 // Probabilistic Motion Model parameters 
 // TUNABLE FOR ROBOT
 // Noise Characteristics
-const float ALPHA1 = 0.1;    // Rotational error due to rotation (rad²/rad²)
-const float ALPHA2 = 0.01;   // Rotational error due to translation (rad²/m²)
-const float ALPHA3 = 0.01;   // Translational error due to translation (m²/m²)
-const float ALPHA4 = 0.1;    // Translational error due to rotation (m²/rad²)
+float ALPHA1 = 0.1f;    // Rotational error due to rotation (rad²/rad²)
+float ALPHA2 = 0.01f;   // Rotational error due to translation (rad²/m²)
+float ALPHA3 = 0.01f;   // Translational error due to translation (m²/m²)
+float ALPHA4 = 0.1f;    // Translational error due to rotation (m²/rad²)-
 
 // // Conservative settings (more uncertainty)
 // const float ALPHA1 = 0.2;    // If your robot has wheel slip
@@ -46,6 +52,10 @@ long prevTicksR = 0;
 float robot_x = 0.0;                        // robot position in meters (renamed to avoid conflicts)
 float robot_y = 0.0;
 float robot_theta = 0.0;                    // robot orientation in radians
+
+float sampled_x = 0.0;
+float sampled_y = 0.0;
+float sampled_theta = 0.0;
 
 // Covariance matrix for the robot pose
 // Stored as upper triangle: [σxx, σxy, σxθ, σyy, σyθ, σθθ]
@@ -81,7 +91,7 @@ float gaussianRandom(float mean, float std_dev){
     return mean + std_dev * u * mag; // return Gaussian random variable
 }
 
-// Covariance Propagation function
+// COvariance Propagation function
 void matrixMultiply3x3(const float A[9], const float B[9], float result[9]) {
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
@@ -177,33 +187,41 @@ void updateOdometry() {
     float delta_trans = (dSLeft + dSRight) / 2.0;
     float delta_rot = (dSRight - dSLeft) / WHEEL_BASE;
 
-    // for differential drive kinematics
-    float delta_rot1 = 0.0;  // Initial rotation (for non-holonomic motion)
-    float delta_rot2 = delta_rot;  // Final rotation
-
-    if (fabs(delta_trans) > 0.001) {
-        delta_rot1 = atan2(delta_trans * sin(delta_rot), delta_trans * cos(delta_rot)) - robot_theta;
-        delta_rot2 = delta_rot - delta_rot1;
-    }
-
-    // store last deltas for next update
-    last_delta_rot1 = delta_rot1;
-    last_delta_trans = delta_trans;
-    last_delta_rot2 = delta_rot2;
-
     // Deterministic Motion Model update (mean)
     float old_x = robot_x;
     float old_y = robot_y;
     float old_theta = robot_theta;
 
     // Update robot pose using differential drive kinematics
-    robot_x += delta_trans * cos(robot_theta + delta_rot1);
-    robot_y += delta_trans * sin(robot_theta + delta_rot1);
+    robot_x += delta_trans * cos(robot_theta + delta_rot/2.0);
+    robot_y += delta_trans * sin(robot_theta + delta_rot/2.0);
     robot_theta += delta_rot;
     
     // Normalize theta to [-PI, PI]
     while (robot_theta > PI) robot_theta -= 2.0 * PI;
     while (robot_theta < -PI) robot_theta += 2.0 * PI;
+
+    float delta_rot1 = 0.0;  // Initial rotation
+    float delta_rot2 = delta_rot;  // Final rotation after translation
+
+    if (fabs(delta_rot) > 0.001 && fabs(delta_trans) > 0.001) {
+        // Split rotation: half before, half after translation
+        delta_rot1 = delta_rot / 2.0;
+        delta_rot2 = delta_rot / 2.0;
+    } else if (fabs(delta_rot) > 0.001) {
+        // Pure rotation
+        delta_rot1 = 0.0;
+        delta_rot2 = delta_rot;
+        delta_trans = 0.0;  // Ensure no translation for pure rotation
+    } else {
+        // Pure translation
+        delta_rot1 = 0.0;
+        delta_rot2 = 0.0;
+    }
+
+    last_delta_rot1 = delta_rot1;
+    last_delta_trans = delta_trans;
+    last_delta_rot2 = delta_rot2;
 
     // Probabilistic Motion Model update (covariance)
     // Motion model noise
@@ -212,20 +230,22 @@ void updateOdometry() {
     float rot2_var = ALPHA1 * fabs(delta_rot2) + ALPHA2 * fabs(delta_trans);
 
     // Encoder Noise
-    float encoder_noise = ENCODER_NOISE_PER_TICK * (fabs(deltaLeft) + fabs(deltaRight));
+    float total_distance = fabs(dSLeft) + fabs(dSRight);
+    float encoder_noise = ENCODER_NOISE_PER_TICK * total_distance / (2.0 * WHEEL_RADIUS);
     trans_var += encoder_noise;
 
     // jacobian of the motion model wrt pose
+    float mid_theta = old_theta + delta_rot1;
     float G[9] = {
-        1, 0, -delta_trans * sin(old_theta + delta_rot1),
-        0, 1, delta_trans * cos(old_theta + delta_rot1),
-        0, 0, 1
+        1, 0, -delta_trans * sin(mid_theta),
+        0, 1,  delta_trans * cos(mid_theta),
+        0, 0,  1
     };
 
     // jacobian of the motion model wrt control
     float V[9] = {
-        -delta_trans * sin(old_theta + delta_rot1), cos(old_theta + delta_rot1), -delta_trans * sin(old_theta + delta_rot1),
-         delta_trans * cos(old_theta + delta_rot1), sin(old_theta + delta_rot1),  delta_trans * cos(old_theta + delta_rot1),
+        -delta_trans * sin(mid_theta), cos(mid_theta), 0,
+         delta_trans * cos(mid_theta), sin(mid_theta), 0,
          1, 0, 1
     };
 
@@ -244,12 +264,12 @@ void updateOdometry() {
     float GT[9], VT[9];
     transposeMatrix3x3(G, GT);
     transposeMatrix3x3(V, VT);
-
+    // Sigma' = GT * Sigma * G + V * M * VT
     float temp1[9], temp2[9], temp3[9], temp4[9];
-    matrixMultiply3x3(GT, Sigma, temp1); // GT * Sigma
-    matrixMultiply3x3(temp1, G, temp2); // GT * Sigma * G
-    matrixMultiply3x3(V, M, temp3); // V * M
-    matrixMultiply3x3(temp3, VT, temp4); // GT * Sigma * G * V * M
+    matrixMultiply3x3(G, Sigma, temp1);     // G * Σ
+    matrixMultiply3x3(temp1, GT, temp2);    // G * Σ * G^T (process uncertainty)
+    matrixMultiply3x3(V, M, temp3);         // V * M
+    matrixMultiply3x3(temp3, VT, temp4);    // V * M * V^T (motion noise)
 
     for (int i = 0; i < 9; i++) {
         temp2[i] += temp4[i]; // Sigma' = GT * Sigma * G + V * M * VT
@@ -260,6 +280,11 @@ void updateOdometry() {
     covariance[0] = max(covariance[0], 1e-6f); // σxx
     covariance[3] = max(covariance[3], 1e-6f); // σyy
     covariance[5] = max(covariance[5], 1e-6f); // σθθ
+
+// if (fabs(delta_trans) > 0.001 || fabs(delta_rot) > 0.001) {
+//         Serial.printf("Motion: dL=%.4f, dR=%.4f, dTrans=%.4f, dRot=%.4f\n", 
+//                       dSLeft, dSRight, delta_trans, delta_rot);
+//     }
 }
 
 // sample from current pose with noise
@@ -270,6 +295,21 @@ void samplePose(float &sample_x, float &sample_y, float &sample_theta) {
     // Normalize theta to [-PI, PI]
     while (sample_theta > PI) sample_theta -= 2.0 * PI;
     while (sample_theta < -PI) sample_theta += 2.0 * PI;
+}
+
+// FOR PARTCLE FILTER CHAIN SAMPLING
+void updateSampledPoseFromLastDelta() {
+    float noisy_rot1  = last_delta_rot1 + gaussianRandom(0.0, sqrt(ALPHA1 * fabs(last_delta_rot1) + ALPHA2 * fabs(last_delta_trans)));
+    float noisy_trans = last_delta_trans + gaussianRandom(0.0, sqrt(ALPHA3 * fabs(last_delta_trans) + ALPHA4 * (fabs(last_delta_rot1) + fabs(last_delta_rot2))));
+    float noisy_rot2  = last_delta_rot2 + gaussianRandom(0.0, sqrt(ALPHA1 * fabs(last_delta_rot2) + ALPHA2 * fabs(last_delta_trans)));
+
+    robot_x += noisy_trans * cos(robot_theta + noisy_rot1);
+    robot_y += noisy_trans * sin(robot_theta + noisy_rot1);
+    robot_theta += noisy_rot1 + noisy_rot2;
+
+    // Normalize angle
+    while (robot_theta > PI) robot_theta -= 2.0 * PI;
+    while (robot_theta < -PI) robot_theta += 2.0 * PI;
 }
 
 void resetOdometry() {
@@ -291,27 +331,33 @@ void resetOdometry() {
 }
 
 void printPose() {
+
     // Serial.print("Robot Pose - X: "); 
     // Serial.print(robot_x, 4);
+    // Serial.print(" ± "); 
+    // Serial.print(sqrt(covariance[0]), 4);
     // Serial.print(" m, Y: "); 
     // Serial.print(robot_y, 4);
+    // Serial.print(" ± "); 
+    // Serial.print(sqrt(covariance[3]), 4);
     // Serial.print(" m, Theta: "); 
     // Serial.print(robot_theta * 180.0 / PI, 2);
+    // Serial.print(" ± "); 
+    // Serial.print(sqrt(covariance[5]) * 180.0 / PI, 2);
     // Serial.println(" degrees");
 
-    Serial.print("Robot Pose - X: "); 
-    Serial.print(robot_x, 4);
-    Serial.print(" ± "); 
-    Serial.print(sqrt(covariance[0]), 4);
-    Serial.print(" m, Y: "); 
-    Serial.print(robot_y, 4);
-    Serial.print(" ± "); 
-    Serial.print(sqrt(covariance[3]), 4);
-    Serial.print(" m, Theta: "); 
-    Serial.print(robot_theta * 180.0 / PI, 2);
-    Serial.print(" ± "); 
-    Serial.print(sqrt(covariance[5]) * 180.0 / PI, 2);
-    Serial.println(" degrees");
+    // UDP output
+    char buffer[150];
+    snprintf(buffer, sizeof(buffer),
+        "Robot Pose - X: %.4f ± %.4f m, Y: %.4f ± %.4f m, Theta: %.2f ± %.2f degrees",
+        robot_x, sqrt(covariance[0]),
+        robot_y, sqrt(covariance[3]),
+        robot_theta * 180.0 / PI, sqrt(covariance[5]) * 180.0 / PI
+    );
+
+    udp.beginPacket(remoteIP, remotePort);
+    udp.print(buffer);
+    udp.endPacket();
 }
 
 void printCovariance() {
@@ -319,11 +365,35 @@ void printCovariance() {
     Serial.printf("  [%8.6f %8.6f %8.6f]\n", covariance[0], covariance[1], covariance[2]);
     Serial.printf("  [%8.6f %8.6f %8.6f]\n", covariance[1], covariance[3], covariance[4]);
     Serial.printf("  [%8.6f %8.6f %8.6f]\n", covariance[2], covariance[4], covariance[5]);
+
+    // UDP output
+    // char buffer[100];
+    // snprintf(buffer, sizeof(buffer),
+    //     "Covariance Matrix:\n"
+    //     "  [%.6f %.6f %.6f]\n"
+    //     "  [%.6f %.6f %.6f]\n"
+    //     "  [%.6f %.6f %.6f]",
+    //     covariance[0], covariance[1], covariance[2],
+    //     covariance[1], covariance[3], covariance[4],
+    //     covariance[2], covariance[4], covariance[5]
+    // );
+    // udp.beginPacket(remoteIP, remotePort);
+    // udp.print(buffer);
+    // udp.endPacket();
 }
 
 void printMotionModel() {
     Serial.printf("Last Motion: rot1=%.4f, trans=%.4f, rot2=%.4f\n", 
                   last_delta_rot1, last_delta_trans, last_delta_rot2);
+    // UDP output
+    // char buffer[100];
+    // snprintf(buffer, sizeof(buffer),
+    //          "Last Motion: rot1=%.4f, trans=%.4f, rot2=%.4f",
+    //          last_delta_rot1, last_delta_trans, last_delta_rot2);
+
+    // udp.beginPacket(remoteIP, remotePort);
+    // udp.print(buffer);
+    // udp.endPacket();
 }
 
 // functions for accessing pose data
@@ -342,9 +412,19 @@ void getCovariance(float cov[6]){
     }
 }
 
-void setNoiseParameters(float alpha1, float alpha2, float alpha3, float alpha4) {
+void setNoiseParameters(float a1, float a2, float a3, float a4) {
+    ALPHA1=a1; ALPHA2=a2; ALPHA3=a3; ALPHA4=a4;
     Serial.printf("Setting noise parameters: ALPHA1=%.4f, ALPHA2=%.4f, ALPHA3=%.4f, ALPHA4=%.4f\n", 
-                  alpha1, alpha2, alpha3, alpha4);
+                  a1, a2, a3, a4);
+    
+                  // UDP output
+    // char buffer[100];
+    // snprintf(buffer, sizeof(buffer),
+    //          "Setting noise parameters: ALPHA1=%.4f, ALPHA2=%.4f, ALPHA3=%.4f, ALPHA4=%.4f",
+    //          alpha1, alpha2, alpha3, alpha4);
+    // udp.beginPacket(remoteIP, remotePort);
+    // udp.print(buffer);
+    // udp.endPacket();
 }
 
 #endif // ODOMETRY_H
