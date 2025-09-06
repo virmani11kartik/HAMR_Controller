@@ -14,14 +14,6 @@
 #include <Adafruit_BNO055.h>
 #include <Adafruit_BNO08x.h>
 #include "odometry.h"
-#include "ekf_localization.h"
-#include "Adafruit_ICM20948.h"
-#include "Adafruit_VL53L1X.h"
-#include <USBHID.h>
-#include <USB.h>
-#include <USB_STREAM.h>
-#include <USBHIDGamepad.h>
-#include <ESP32-USB-Soft-Host.h>
 
 // void setup() {
 //   pinMode(LED_BUILTIN, OUTPUT);
@@ -35,11 +27,6 @@
 //   digitalWrite(LED_BUILTIN, LOW);
 //   delay(1000);
 // }
-
-EKFLocalization ekf;
-bool use_ekf = true; // Use EKF localization by default
-unsigned long lastEKFTime = 0;
-const unsigned long EKF_INTERVAL = 50; // EKF update interval in milliseconds
 
 // // // float lx, ly, rx, ry, lt, rt;
 int a, b, x, y;
@@ -81,60 +68,6 @@ const char* webpage = R"rawliteral(
       align-items: center;
       justify-content: center;
       gap: 15px;
-    }
-
-    .localization-toggle {
-      margin: 20px 0;
-      padding: 15px;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 15px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-
-    .toggle-switch {
-      position: relative;
-      display: inline-block;
-      width: 60px;
-      height: 30px;
-      margin: 0 10px;
-    }
-
-    .toggle-switch input {
-      opacity: 0;
-      width: 0;
-      height: 0;
-    }
-
-    .slider-toggle {
-      position: absolute;
-      cursor: pointer;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background-color: #ccc;
-      border-radius: 30px;
-      transition: .4s;
-    }
-
-    .slider-toggle:before {
-      position: absolute;
-      content: "";
-      height: 22px;
-      width: 22px;
-      left: 4px;
-      bottom: 4px;
-      background-color: white;
-      border-radius: 50%;
-      transition: .4s;
-    }
-
-    input:checked + .slider-toggle {
-      background-color: #4ecdc4;
-    }
-
-    input:checked + .slider-toggle:before {
-      transform: translateX(30px);
     }
 
     #joystickZone {
@@ -301,16 +234,6 @@ const char* webpage = R"rawliteral(
       animation: pulse 2s infinite;
     }
 
-    .ekf-indicator {
-      background: #ff6b6b;
-      animation: pulse 1s infinite;
-    }
-
-    .ekf-indicator.active {
-      background: #4ecdc4;
-      animation: pulse 2s infinite;
-    }
-
     @keyframes pulse {
       0% { opacity: 1; }
       50% { opacity: 0.5; }
@@ -339,32 +262,11 @@ const char* webpage = R"rawliteral(
       color: rgba(255, 255, 255, 0.9);
       min-width: 30px;
     }
-
-    .imu-status {
-      margin: 10px 0;
-      padding: 10px;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 10px;
-      font-size: 0.9em;
-    }
   </style>
 </head>
 <body>
   <div class="container">
     <h2>HAMR Robot Control <span class="status-indicator"></span></h2>
-
-    <div class="localization-toggle">
-      <h3>Localization Mode</h3>
-      <span>Odometry</span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="ekfToggle" checked>
-        <span class="slider-toggle"></span>
-      </label>
-      <span>EKF Fusion</span>
-      <div class="imu-status" id="imuStatus">
-        IMU Status: <span class="ekf-indicator" id="imuIndicator"></span> Checking...
-      </div>
-    </div>
 
     <div class="control-group">
       <h3>Drive Control</h3>
@@ -397,17 +299,14 @@ const char* webpage = R"rawliteral(
     </div>
 
     <div class="control-group">
-      <button onclick="resetLocalization()">Reset Localization</button>
-      <button onclick="calibrateIMU()">Calibrate IMU</button>
+      <button onclick="resetOdometry()">Reset Odometry</button>
       <button onclick="getPose()">Get Pose</button>
     </div>
 
     <div class="info-panel" id="infoPanel">
       Robot Status: Ready<br>
-      Localization: EKF Mode<br>
       Position: X=0.000, Y=0.000, θ=0.0°<br>
-      Uncertainty: ±0.000m, ±0.0°<br>
-      IMU: Not calibrated<br>
+      LT: 0.00 | RT: 0.00<br>
       Last Command: None
     </div>
   </div>
@@ -418,23 +317,9 @@ const char* webpage = R"rawliteral(
     const turretSlider = document.getElementById('turretSlider');
     const turretValue = document.getElementById('turretValue');
     const infoPanel = document.getElementById('infoPanel');
-    const ekfToggle = document.getElementById('ekfToggle');
-    const imuStatus = document.getElementById('imuStatus');
-    const imuIndicator = document.getElementById('imuIndicator');
     
     let dragging = false;
     let currentTurretValue = 0;
-    let useEKF = true;
-
-    // EKF Toggle
-    ekfToggle.addEventListener('change', function() {
-      useEKF = this.checked;
-      fetch(`/setEKF?enabled=${useEKF}`)
-        .then(response => response.text())
-        .then(data => {
-          updateInfoPanel(`Localization mode: ${useEKF ? 'EKF' : 'Odometry'}`);
-        });
-    });
 
     // Joystick event listeners
     zone.addEventListener('touchstart', startDrag);
@@ -451,18 +336,22 @@ const char* webpage = R"rawliteral(
       turretValue.textContent = currentTurretValue + '%';
       
       if (currentTurretValue < 0) {
+        // Left side = LT trigger
         const ltValue = Math.abs(currentTurretValue) / 100.0;
         sendTrigger('lt', ltValue);
       } else if (currentTurretValue > 0) {
+        // Right side = RT trigger  
         const rtValue = currentTurretValue / 100.0;
         sendTrigger('rt', rtValue);
       } else {
+        // Center = stop
         sendTrigger('stop', 0);
       }
       
       updateInfoPanel();
     });
 
+    // Auto-return to center when released
     turretSlider.addEventListener('mouseup', returnToCenter);
     turretSlider.addEventListener('touchend', returnToCenter);
 
@@ -558,11 +447,11 @@ const char* webpage = R"rawliteral(
         });
     }
 
-    function resetLocalization() {
+    function resetOdometry() {
       fetch('/reset')
         .then(response => response.text())
         .then(data => {
-          updateInfoPanel('Localization reset successfully');
+          updateInfoPanel('Odometry reset successfully');
           getPose();
         })
         .catch(err => {
@@ -571,31 +460,11 @@ const char* webpage = R"rawliteral(
         });
     }
 
-    function calibrateIMU() {
-      fetch('/calibrateIMU')
-        .then(response => response.text())
-        .then(data => {
-          updateInfoPanel('IMU calibration initiated');
-          checkIMUStatus();
-        })
-        .catch(err => {
-          console.error('IMU calibration failed:', err);
-          updateInfoPanel('IMU calibration failed');
-        });
-    }
-
     function getPose() {
       fetch('/pose')
         .then(response => response.json())
         .then(data => {
-          const locMode = useEKF ? 'EKF' : 'Odometry';
-          let poseInfo = `Position: X=${data.x.toFixed(3)}, Y=${data.y.toFixed(3)}, θ=${(data.theta * 180 / Math.PI).toFixed(1)}°`;
-          
-          if (data.uncertainty_x !== undefined) {
-            poseInfo += `<br>Uncertainty: ±${data.uncertainty_x.toFixed(3)}m, ±${(data.uncertainty_theta * 180 / Math.PI).toFixed(1)}°`;
-          }
-          
-          updateInfoPanel(poseInfo, locMode);
+          updateInfoPanel(`Position: X=${data.x.toFixed(3)}, Y=${data.y.toFixed(3)}, θ=${(data.theta * 180 / Math.PI).toFixed(1)}°`);
         })
         .catch(err => {
           console.error('Get pose failed:', err);
@@ -603,27 +472,7 @@ const char* webpage = R"rawliteral(
         });
     }
 
-    function checkIMUStatus() {
-      fetch('/imuStatus')
-        .then(response => response.json())
-        .then(data => {
-          const status = data.calibrated ? 'Calibrated' : 'Not calibrated';
-          const indicator = document.getElementById('imuIndicator');
-          
-          if (data.calibrated) {
-            indicator.classList.add('active');
-            imuStatus.innerHTML = `IMU Status: <span class="ekf-indicator active"></span> ${status}`;
-          } else {
-            indicator.classList.remove('active');
-            imuStatus.innerHTML = `IMU Status: <span class="ekf-indicator"></span> ${status}`;
-          }
-        })
-        .catch(err => {
-          console.error('IMU status check failed:', err);
-        });
-    }
-
-    function updateInfoPanel(message, locMode) {
+    function updateInfoPanel(message) {
       const timestamp = new Date().toLocaleTimeString();
       let triggerStatus = 'None';
       
@@ -633,11 +482,8 @@ const char* webpage = R"rawliteral(
         triggerStatus = `RT: ${(currentTurretValue / 100).toFixed(2)}`;
       }
       
-      const mode = locMode || (useEKF ? 'EKF Mode' : 'Odometry Mode');
-      
       infoPanel.innerHTML = `
         Robot Status: Active<br>
-        Localization: ${mode}<br>
         Turret Control: ${triggerStatus}<br>
         Last Command: ${message || 'None'}<br>
         Time: ${timestamp}
@@ -649,12 +495,10 @@ const char* webpage = R"rawliteral(
       turretSlider.value = 0;
       turretValue.textContent = '0%';
       updateInfoPanel('System initialized');
-      checkIMUStatus();
     });
 
-    // Auto-update pose and IMU status
+    // Auto-update pose every 2 seconds
     setInterval(getPose, 2000);
-    setInterval(checkIMUStatus, 5000);
   </script>
 </body>
 </html>
@@ -666,11 +510,13 @@ WebServer server(80);
 const char* ssid = "HAMR";
 const char* password = "123571113";
 
+//---------------------------GLOBALS----------------------
 // UDP SETUP
 WiFiUDP udp;
 const int port = 12345;  // Port to listen on
 char incoming[256];  // Buffer for incoming data
-
+IPAddress remoteIP;
+unsigned int remotePort;
 // Left
 const int pwmL = 11;
 const int dirL = 12;
@@ -697,9 +543,8 @@ volatile long ticksR = 0;
 volatile long ticksT = 0;
 
 // PID constants for synchronization
-const float Kp_sync = 0.0;
-const float Ki_sync = 0.0;
-const float Kd_sync = 0.0;
+float Kp_L = 120.0f, Ki_L = 40.0f, Kd_L = 0.0f;   // tune per wheel
+float Kp_R = 120.0f, Ki_R = 40.0f, Kd_R = 0.0f;   // tune per wheel
 
 // Encoder & motor specs
 const int CPR = 64;
@@ -709,19 +554,19 @@ const int TICKS_PER_WHEEL_REV = CPR * GEAR_RATIO; // 9600 ticks per wheel revolu
 // Turret motor specs
 const int TICKS_PER_TURRET_REV = 2704; // 13 PPR × 2 (quadrature) × 104 (gear ratio) = 2704 ticks/rev at output
 const float DEGREES_PER_TURRET_TICK = 360.0 / TICKS_PER_TURRET_REV; // Degrees per tick
-const float motorGearTeeth = 41.0; // Motor gear teeth
-const float outputGearTeeth = 130.0; // Output gear teeth
+const float motorGearTeeth = 40.0; // Motor gear teeth
+const float outputGearTeeth = 136.0; // Output gear teeth
 const float turretGearRatio = outputGearTeeth / motorGearTeeth; // Turret gear ratio
 
 // Target angle for turret in degrees
-float currentAngleT = 0;
+float currentAngleT = 0.0;
 float inputTurretAngle = 0.0;  // Desired turret angle in degrees
 float targetTurretAngle = inputTurretAngle * turretGearRatio; // Target angle in degrees
 
 // PID constants for turret control
-const float Kp_turret = 12.0;
-const float Ki_turret = 0.8;
-const float Kd_turret = 0.8;
+const float Kp_turret = 18.0;
+const float Ki_turret = 0.05;
+const float Kd_turret = 0.1;
 
 float integralT = 0.0; // Integral term for turret PID0
 float lastErrorT = 0.0; // Last error for turret PID
@@ -729,44 +574,127 @@ unsigned long lastTurretTime = 0; // Last time turret PID was updated
 // PWM limits
 const int minPWM = 200;   // Minimum PWM value
 const int maxPWM = 4095; // Maximum PWM value (12-bit resolution)
+const int maxPWM_D = 4095;
+float pwmL_out = 0.0;
+float pwmR_out = 0.0;
 
 // Control interval (ms)
 const unsigned long PID_INTERVAL = 50;
 static unsigned long lastUdpTime = 0;
 
 // PID state variables
-float integralSync = 0;
-float lastErrorSync = 0;
+float integralL = 0.0f, integralR = 0.0f;
+float lastErrL = 0.0f, lastErrR = 0.0f;
 float errorT = 0;
 
 // Timing variables
 unsigned long lastPidTime = 0;
 long lastTicksL = 0;
 long lastTicksR = 0;
+long lastTicksT = 0;
 
 // Base PWM speed (0-4095)
-float basePWM = 4095;
+float basePWM = 3500;
+const float MAX_RPM_CMD = 28.0f;
 float pwmT_out = 0;
+float scaleFactor = 1.0; //131.67;
 // float turretSpeed = 0.0;
+
+float test = 0.0f;
 
 // Joystick control variables
 float ly = 0.0f;  // left stick vertical (forward/back)
 float rx = 0.0f;  // right stick horizontal (turn)
-float lt = 0.0f;
-float rt = 0.0f; // left/right triggers
+float lt = INT32_MIN; // left trigger
+float rt = INT32_MIN; // left/right triggers
 // HTTML Joystick control variables
 float joyX = 0.0f;  // Joystick X-axis
 float joyY = 0.0f;  // Joystick Y-axis
 float joyturretX = 0.0f;  // Turret joystick X-axis
 float joyturretY = 0.0f;  // Turret joystick Y-axis
+String btn = "stop"; // Button pressed (e.g., 'f' for forward, 'b' for backward)
+float value = 0.0f; // Value of the button pressed
 
 // Odometry timing
 unsigned long lastOdometryTime = 0;
 const unsigned long ODOMETRY_INTERVAL = 100; // Odometry update interval in ms
 
-// Current command
-// char command = 'f'; // start forward
+// ----------------- UART Protocol -----------------
+static const uint16_t MAGIC = 0xCAFE;
+static const uint16_t VER   = 1;
+static const uint16_t TYPE_CMD  = 0x0001; // PC->ESP : left,right
+static const uint16_t TYPE_CMD3 = 0x0011; // PC->ESP : left,right,turret
+static const uint16_t TYPE_ENC  = 0x0003; // ESP->PC : encoders
+// Latest commands received over UART (ROS)
+volatile float uart_left_cmd = 0.0f;
+volatile float uart_right_cmd = 0.0f;
+volatile float uart_turret_cmd = 0.0f;
+volatile uint32_t last_uart_cmd_ms = 0;
 
+// Enc packet sequence
+static uint32_t enc_seq = 0;
+
+#pragma pack(push,1)
+struct CmdPacket {
+  uint16_t magic, ver, type;
+  uint32_t seq;
+  uint64_t t_tx_ns;
+  float left, right;
+  uint16_t crc16;
+};
+struct Cmd3Packet {
+  uint16_t magic, ver, type;
+  uint32_t seq;
+  uint64_t t_tx_ns;
+  float left, right, turret;
+  uint16_t crc16;
+};
+struct EncPacket {
+  uint16_t magic, ver, type;
+  uint32_t seq;
+  uint64_t t_tx_ns;
+  int32_t ticksL, ticksR, ticksT;
+  uint16_t crc16;
+};
+
+#pragma pack(pop)
+
+static const size_t CMD_SIZE  = sizeof(CmdPacket);   // 2-float
+static const size_t CMD3_SIZE = sizeof(Cmd3Packet);  // 3-float
+static const size_t ENC_SIZE  = sizeof(EncPacket);
+
+// CRC32->16 surrogate (must match Pi side)
+uint16_t crc16_surrogate(const uint8_t* data, size_t n) {
+  uint32_t c = 0xFFFFFFFFu;
+  for (size_t i=0;i<n;i++) {
+    c ^= data[i];
+    for (int k=0;k<8;k++) {
+      c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+    }
+  }
+  c ^= 0xFFFFFFFFu;
+  return (uint16_t)(c & 0xFFFF);
+}
+
+// ------------- Units & conversion -------------
+constexpr float WHEEL_RADIUS_M = 0.0762f;      // your wheel radius
+constexpr float MAX_WHEEL_RPM  = 30.0f;       // safety clamp (tune)
+enum WheelCmdUnits { CMD_MPS, CMD_RAD_PER_S, CMD_RPM };
+constexpr WheelCmdUnits CMD_UNITS = CMD_RAD_PER_S;   // ROS cmd units
+
+inline float wheel_rpm_from_cmd(float v) {
+  switch (CMD_UNITS) {
+    case CMD_MPS:      return v * 60.0f / (2.0f * (float)M_PI * WHEEL_RADIUS_M);
+    case CMD_RAD_PER_S:return v * 60.0f / (2.0f * (float)M_PI);
+    case CMD_RPM:
+    default:           return v;
+  }
+}
+template<typename T> inline T clamp(T x, T lo, T hi) {
+  return x < lo ? lo : (x > hi ? hi : x);
+}
+
+// ------------------------ ENCODERS------------------
 // Encoder interrupts (quadrature decoding)
 void IRAM_ATTR handleEncL() {
   bool A = digitalRead(encAL);
@@ -787,6 +715,7 @@ void IRAM_ATTR handleEncT() {
   ticksT += (A == B) ? 1 : -1; // Adjust based on your encoder wiring
 }
 
+//-----------------------------SET MOTORS---------------------
 // Set motor PWM and direction
 void setMotor(int pwmPin, int dirPin, float pwmVal, int channel) {
   pwmVal = constrain(pwmVal, -4095, 4095);
@@ -799,93 +728,93 @@ void setMotor(int pwmPin, int dirPin, float pwmVal, int channel) {
   }
 }
 
-void setupWebServerEndpoints() {
-  server.on("/", HTTP_GET, []() {
-    server.send(200, "text/html", webpage);
-  });
-
-  // Movement control
-  server.on("/move", HTTP_GET, []() {
-    float x = server.arg("x").toFloat();
-    float y = server.arg("y").toFloat();
-    joyX = x;
-    joyY = -y;
-    server.send(200, "text/plain", "Movement received");
-  });
-
-  // Turret control
-  server.on("/trigger", HTTP_GET, []() {
-    String btn = server.arg("btn");
-    float value = server.arg("value").toFloat();
-
-    if (btn == "lt") {
-      pwmT_out = -value * maxPWM;
-    } else if (btn == "rt") {
-      pwmT_out = value * maxPWM;
-    } else if (btn == "stop") {
-      pwmT_out = 0;
-    }
-
-    setMotor(pwmT, dirT, pwmT_out, 2);
-    server.send(200, "text/plain", "Trigger received: " + btn);
-  });
-
-  // Turret angle control
-  server.on("/setTurretAngle", HTTP_GET, []() {
-    float angle = server.arg("angle").toFloat();
-    inputTurretAngle = angle;
-    targetTurretAngle = inputTurretAngle * turretGearRatio;
-    server.send(200, "text/plain", "Turret angle set.");
-  });
-
-  // EKF toggle
-  server.on("/setEKF", HTTP_GET, []() {
-    String enabled = server.arg("enabled");
-    use_ekf = (enabled == "true");
-    server.send(200, "text/plain", use_ekf ? "EKF enabled" : "EKF disabled");
-  });
-
-  // IMU calibration
-  server.on("/calibrateIMU", HTTP_GET, []() {
-    ekf.calibrateIMU();
-    server.send(200, "text/plain", "IMU calibration initiated");
-  });
-
-  // IMU status
-  server.on("/imuStatus", HTTP_GET, []() {
-    bool calibrated = ekf.isIMUCalibrated();
-    String json = "{\"calibrated\":" + String(calibrated ? "true" : "false") + "}";
-    server.send(200, "application/json", json);
-  });
-
-  // Pose endpoint - now returns EKF or odometry data based on mode
+void setupProbabilisticEndpoints() {
+  // Endpoint to get current pose with uncertainty
   server.on("/pose", HTTP_GET, []() {
     String json = "{";
-    if (use_ekf) {
-      json += "\"x\":" + String(ekf.getX(), 6) + ",";
-      json += "\"y\":" + String(ekf.getY(), 6) + ",";
-      json += "\"theta\":" + String(ekf.getTheta(), 6) + ",";
-      json += "\"uncertainty_x\":" + String(ekf.getUncertaintyX(), 6) + ",";
-      json += "\"uncertainty_y\":" + String(ekf.getUncertaintyY(), 6) + ",";
-      json += "\"uncertainty_theta\":" + String(ekf.getUncertaintyTheta(), 6);
-    } else {
-      json += "\"x\":" + String(getRobotX(), 6) + ",";
-      json += "\"y\":" + String(getRobotY(), 6) + ",";
-      json += "\"theta\":" + String(getRobotTheta(), 6) + ",";
-      json += "\"uncertainty_x\":" + String(getUncertaintyX(), 6) + ",";
-      json += "\"uncertainty_y\":" + String(getUncertaintyY(), 6) + ",";
-      json += "\"uncertainty_theta\":" + String(getUncertaintyTheta(), 6);
-    }
+    json += "\"x\":" + String(getRobotX(), 6) + ",";
+    json += "\"y\":" + String(getRobotY(), 6) + ",";
+    json += "\"theta\":" + String(getRobotTheta(), 6) + ",";
+    json += "\"uncertainty_x\":" + String(getUncertaintyX(), 6) + ",";
+    json += "\"uncertainty_y\":" + String(getUncertaintyY(), 6) + ",";
+    json += "\"uncertainty_theta\":" + String(getUncertaintyTheta(), 6);
     json += "}";
     server.send(200, "application/json", json);
   });
-
-  // Reset localization
+  
+  // Endpoint to reset odometry
   server.on("/reset", HTTP_GET, []() {
     resetOdometry();
-    ekf.resetEKF();
-    server.send(200, "text/plain", "Localization reset");
+    server.send(200, "text/plain", "Odometry reset");
   });
+  
+  // Endpoint to sample from pose distribution
+  server.on("/sample", HTTP_GET, []() {
+    float sample_x, sample_y, sample_theta;
+    samplePose(sample_x, sample_y, sample_theta);
+    String json = "{";
+    json += "\"sample_x\":" + String(sample_x, 6) + ",";
+    json += "\"sample_y\":" + String(sample_y, 6) + ",";
+    json += "\"sample_theta\":" + String(sample_theta, 6);
+    json += "}";
+    server.send(200, "application/json", json);
+  });
+}
+
+void setup() {
+
+  Serial.begin(115200);
+  Serial.println("ESP32 Ready");
+  initOdometry(); // Initialize odometry
+  WiFi.softAP(ssid, password, 5, 0, 2);
+  IPAddress myIP = WiFi.softAPIP();
+  Serial.print("ESP IP: ");
+  Serial.println(myIP);
+
+  server.on("/", HTTP_GET, []() {
+    server.send(200, "text/html", webpage);  // Serve the HTML page
+  });
+  // server.on("/move", HTTP_GET, []() {
+  //   String xVal = server.arg("x");
+  //   String yVal = server.arg("y");
+  //   joyX= xVal.toFloat();
+  //   joyY= -yVal.toFloat();
+  //   Serial.printf("Joystick X: %.2f, Y: %.2f\n", joyX, joyY);
+  //   server.send(200, "text/plain", "OK");
+  // });
+  // Joystick movement (single virtual joystick)
+server.on("/move", HTTP_GET, []() {
+  float x = server.arg("x").toFloat();
+  float y = server.arg("y").toFloat();
+  joyX = x;
+  joyY = -y;
+  server.send(200, "text/plain", "Movement received");
+});
+
+// Trigger buttons: LT or RT
+server.on("/trigger", HTTP_GET, []() {
+  String btn = server.arg("btn");
+  float value = server.arg("value").toFloat();  // Use 'value' param
+
+  if (btn == "lt") {
+    pwmT_out = -value * maxPWM;
+  } else if (btn == "rt") {
+    pwmT_out = value * maxPWM;
+  } else if (btn == "stop") {
+    pwmT_out = 0;
+  }
+
+  setMotor(pwmT, dirT, pwmT_out, 2);
+  server.send(200, "text/plain", "Trigger received: " + btn);
+});
+
+// Turret angle input
+server.on("/setTurretAngle", HTTP_GET, []() {
+  float angle = server.arg("angle").toFloat();
+  inputTurretAngle = angle;
+  targetTurretAngle = inputTurretAngle * turretGearRatio; // Apply gear ratio
+  server.send(200, "text/plain", "Turret angle set.");
+});
 
   server.onNotFound([]() {
     server.send(404, "text/plain", "404 Not Found");
@@ -917,6 +846,7 @@ void setup() {
   udp.begin(port);
   Serial.printf("Listening for UDP on port %d\n", port);
 
+  //---------------------------------PIN DEFINITIONS------------------------
   // Motor pins
   pinMode(pwmL, OUTPUT);
   pinMode(dirL, OUTPUT);
@@ -934,7 +864,6 @@ void setup() {
   ledcAttachPin(pwmL, 0);
   ledcAttachPin(pwmR, 1);
   ledcAttachPin(pwmT, 2); // Attach turret PWM pin to channel 2
-
 
   // Encoder pins with pull-ups
   pinMode(encAL, INPUT_PULLUP);
@@ -954,35 +883,83 @@ void setup() {
   lastPidTime = millis();
   lastTurretTime = millis();
 
-  Serial.println("Motor Sync Control Ready");
-//   Serial.println("Commands: f=forward, b=backward, r=right, l=left, s=stop, +=faster, -=slower");
+  Serial.println("Low Level Control Ready");
+  //Serial.println("Commands: f=forward, b=backward, r=right, l=left, s=stop, +=faster, -=slower");
   Serial.println("Send joystick data like: LX:0.00 LY:0.00 RX:0.00 RY:0.00 LT:0.00 RT:0.00 A:0 B:0 X:0 Y:0");
   Serial.printf("Initial Speed PWM: %.0f\n", basePWM);
 }
 
 void loop() {
-  // Handle serial commands
-//   if (Serial.available()) {
-//     char newCommand = Serial.read();
-//     if (newCommand == 'f' || newCommand == 'b' || newCommand == 'r' || newCommand == 'l' || newCommand == 's') {
-//       command = newCommand;
-//       integralSync = 0;
-//       lastErrorSync = 0;
-//       Serial.printf("Command: %c\n", command);
-//     } else if (newCommand == '+') {
-//       basePWM += 10;
-//       if (basePWM > 4095) basePWM = 4095;
-//       Serial.printf("Speed increased: %d\n", (int)basePWM);
-//     } else if (newCommand == '-') {
-//       basePWM -= 10;
-//       if (basePWM < 0) basePWM = 0;
-//       Serial.printf("Speed decreased: %d\n", (int)basePWM);
-//     }
-//   }
-    // Read joystick data from serial
-    // if (Serial.available()) {
-    // String msg = Serial.readStringUntil('\n');
+    //-------------------------MICRO_ROS_PROTCOL-------------------------------
+    // ---- RX: parse commands (robust to CMD or CMD3) ----
+    static uint8_t buf[64];      // big enough for CMD3 (48 bytes) + slack
+    static size_t  have = 0;
 
+    // accumulate
+    while (Serial0.available() && have < sizeof(buf)) {
+      buf[have++] = (uint8_t)Serial0.read();
+    }
+    // try to parse while we have at least a header
+    while (have >= 6) { // magic(2)+ver(2)+type(2)
+    uint16_t magic = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+    if (magic != MAGIC) {
+      // resync: drop 1 byte
+      memmove(buf, buf+1, --have);
+      continue;
+    }
+    uint16_t ver  = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+    uint16_t type = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
+
+    if (ver != VER) {
+      memmove(buf, buf+1, --have);
+      continue;
+    }
+    size_t need = (type == TYPE_CMD) ? CMD_SIZE :
+                (type == TYPE_CMD3)? CMD3_SIZE : 0;
+    if(need==0){
+      // unknown type; drop 1 byte
+      memmove(buf, buf+1, --have);
+      continue;
+    }
+    if (have < need) break; // incomplete frame
+    if (type == TYPE_CMD && need == CMD_SIZE) {
+      CmdPacket cmd; memcpy(&cmd, buf, CMD_SIZE);
+      uint16_t calc = crc16_surrogate((uint8_t*)&cmd, CMD_SIZE - 2);
+    if (calc == cmd.crc16) {
+      noInterrupts();
+      uart_left_cmd  = cmd.left;
+      uart_right_cmd = cmd.right;
+      last_uart_cmd_ms = millis();
+      interrupts();
+      // (optional) Serial.printf("UART CMD: L=%.3f R=%.3f\n", cmd.left, cmd.right);
+    }
+    memmove(buf, buf + CMD_SIZE, have - CMD_SIZE); have -= CMD_SIZE;
+  } else if (type == TYPE_CMD3 && need == CMD3_SIZE) {
+    Cmd3Packet cmd3; memcpy(&cmd3, buf, CMD3_SIZE);
+    uint16_t calc = crc16_surrogate((uint8_t*)&cmd3, CMD3_SIZE - 2);
+    if (calc == cmd3.crc16) {
+      noInterrupts();
+      uart_left_cmd   = cmd3.left;
+      uart_right_cmd  = cmd3.right;
+      uart_turret_cmd = cmd3.turret;
+      last_uart_cmd_ms = millis();
+      interrupts();
+      // (optional) Serial.printf("UART CMD3: L=%.3f R=%.3f T=%.3f\n", cmd3.left, cmd3.right, cmd3.turret);
+    }
+    memmove(buf, buf + CMD3_SIZE, have - CMD3_SIZE); have -= CMD3_SIZE;
+  } else {
+    // shouldn’t happen
+    memmove(buf, buf+1, --have);
+  }
+
+  }
+
+  // Handle serial commands
+  //   Read joystick data from serial
+  //   if (Serial.available()) {
+  //   String msg = Serial.readStringUntil('\n');}
+
+    //-----------------------TELEOP PROTOCOL------------------------------
     server.handleClient(); // Handle HTTP requests
     int len = udp.parsePacket();
     if (len > 0) {
@@ -991,10 +968,13 @@ void loop() {
       // Serial.printf("Received: %s\n", incoming);
       String msg = String(incoming); 
 
-    int lyIndex = msg.indexOf("LY:");
-    int rxIndex = msg.indexOf("RX:");
-    int ltIndex = msg.indexOf("LT:");
-    int rtIndex = msg.indexOf("RT:");
+      remoteIP = udp.remoteIP();
+      remotePort = udp.remotePort();
+
+      int lyIndex = msg.indexOf("LY:");
+      int rxIndex = msg.indexOf("RX:");
+      int ltIndex = msg.indexOf("LT:");
+      int rtIndex = msg.indexOf("RT:");
 
     if (lyIndex != -1 && rxIndex != -1 && ltIndex != -1 && rtIndex != -1) {
       // Extract LY and RX values as floats
@@ -1021,104 +1001,43 @@ void loop() {
         }
     }
 
-  // PID loop timing
+  ////=======================PID loop timing==================////
   unsigned long now = millis();
   if (now - lastPidTime >= PID_INTERVAL) {
     float dt = (now - lastPidTime) / 1000.0;
 
+    ////=================== DRIVE CONTROL =================////
     // Read encoder counts atomically
     noInterrupts();
     long currentTicksL = ticksL;
     long currentTicksR = ticksR;
+    long currentTicksT = ticksT;
     interrupts();
 
     // Calculate RPM for each motor
     float rpmL = ((currentTicksL - lastTicksL) / dt) * 60.0 / TICKS_PER_WHEEL_REV;
     float rpmR = ((currentTicksR - lastTicksR) / dt) * 60.0 / TICKS_PER_WHEEL_REV;
+    float rpmT = ((currentTicksT - lastTicksT) / dt) * 60.0 / TICKS_PER_TURRET_REV;
+    float rpmT_platform = rpmT * turretGearRatio; // Platform RPM
 
     lastTicksL = currentTicksL;
     lastTicksR = currentTicksR;
     lastPidTime = now;
 
-    // Calculate error between motors (left RPM minus right RPM)
-    float errorSync = rpmL - rpmR;
+    // Calculate ticks and send to Micro ROS Bridge to Publish 
+    static uint32_t last_tx_ms = 0;
+    if (millis() - last_tx_ms >= 10) {
+      last_tx_ms = millis();
 
-    integralSync += errorSync * dt;
-    integralSync = constrain(integralSync, -100, 100);
-    float dErrorSync = (errorSync - lastErrorSync) / dt;
+      EncPacket enc;
+      enc.magic = MAGIC; enc.ver = VER; enc.type = TYPE_ENC;
+      enc.seq = ++enc_seq;
+      enc.t_tx_ns = (uint64_t)micros() * 1000ull;
+      noInterrupts(); enc.ticksL = ticksL; enc.ticksR = ticksR; enc.ticksT = ticksT; interrupts();
+      enc.crc16 = crc16_surrogate((uint8_t*)&enc, ENC_SIZE - 2);
 
-    float correctionPWM = Kp_sync * errorSync + Ki_sync * integralSync + Kd_sync * dErrorSync;
-    lastErrorSync = errorSync;
-
-    // Turret control based on HTML joystick input
-    if (lt > 0.1 || rt > 0.1){
-    // Simple turret control based on triggers
-      float turretSpeed = (lt > 0.1) ? -lt * maxPWM : rt * maxPWM;
-      pwmT_out = turretSpeed;
-      currentAngleT = ticksT * DEGREES_PER_TURRET_TICK; // Calculate turret angle in degrees
-      currentAngleT = fmod(currentAngleT/turretGearRatio, 360.0);
-    setMotor(pwmT, dirT, turretSpeed, 2);
+      Serial0.write((uint8_t*)&enc, ENC_SIZE); // binary out on the data UART
     }
-    else if (abs(targetTurretAngle) > 0.1) {
-      // Turret PID control
-      // Read turret encoder counts atomically
-      noInterrupts();
-      long currentTicksT = ticksT;
-      interrupts();
-      // Calculate turret angle in degrees
-      float currentAngleT = currentTicksT * DEGREES_PER_TURRET_TICK;
-      // Calculate error for turret PID
-      float errorT = targetTurretAngle - currentAngleT;
-      float pwmT_out = 0;
-      if(abs(errorT) < 1.0 || abs(pwmT_out) < 100) {
-        setMotor(pwmT, dirT, 0, 2);  // Stop turret
-        pwmT_out = 0; // Reset output if within threshold
-        integralT = 0; // Reset integral term if within threshold
-      }
-      else{
-        float dtT = (now - lastTurretTime) / 1000.0; // Time in seconds
-        if (dtT == 0) dtT = 0.001; // Avoid division by zero
-        integralT += errorT * dtT;
-        integralT = constrain(integralT, -100, 100);
-        float dErrorT = (errorT - lastErrorT) / dtT;
-        // Calculate turret PWM output
-        float pwmT_out = Kp_turret * errorT + Ki_turret * integralT + Kd_turret * dErrorT;
-        pwmT_out = constrain(pwmT_out, -maxPWM, maxPWM);
-        // if (abs(pwmT_out) < minPWM) pwmT_out = 0;
-        // Set turret motor PWM
-        setMotor(pwmT, dirT, pwmT_out, 2); 
-        lastErrorT = errorT;
-        lastTurretTime = now;
-      }
-    }
-    else{
-      setMotor(pwmT, dirT, 0, 2);  // Stop turret
-    }
-    // Calculate base PWM values per motor based on command
-    // float pwmL_base = 0, pwmR_base = 0;
-    // switch (command) {
-    //   case 'f': // forward both motors
-    //     pwmL_base = basePWM;
-    //     pwmR_base = basePWM;
-    //     break;
-    //   case 'b': // backward both motors
-    //     pwmL_base = -basePWM;
-    //     pwmR_base = -basePWM;
-    //     break;
-    //   case 'r': // right turn: left forward, right backward
-    //     pwmL_base = basePWM;
-    //     pwmR_base = -basePWM;
-    //     break;
-    //   case 'l': // left turn: left backward, right forward
-    //     pwmL_base = -basePWM;
-    //     pwmR_base = basePWM;
-    //     break;
-    //   case 's': // stop
-    //   default:
-    //     pwmL_base = 0;
-    //     pwmR_base = 0;
-    //     break;
-    // }
 
     // Joystick-based differential drive control:
     // Negative ly because joystick up may be negative, adjust if needed
@@ -1131,73 +1050,159 @@ void loop() {
     // float turn = joyX;     // Left/right control from joystick
 
     bool useUdp = (millis() - lastUdpTime < 100);
+    bool useUart = (millis() - last_uart_cmd_ms < 150);
+
+    float rpmTargetL = 0.0f, rpmTargetR = 0.0f;
+    float pwmFF_L = 0.0f, pwmFF_R = 0.0f;
+    
+    if (useUart) {
+      // Convert ROS cmd vel -> wheel RPM, then clamp to your controller’s max
+      float Lrpm = clamp(wheel_rpm_from_cmd(uart_left_cmd),  -MAX_RPM_CMD,  MAX_RPM_CMD);
+      float Rrpm = clamp(wheel_rpm_from_cmd(uart_right_cmd), -MAX_RPM_CMD,  MAX_RPM_CMD);
+      rpmTargetL = Lrpm;
+      rpmTargetR = Rrpm;
+
+      // Keep your existing FF style: scale basePWM by the normalized target
+      pwmFF_L = basePWM * (rpmTargetL / MAX_RPM_CMD);
+      pwmFF_R = basePWM * (rpmTargetR / MAX_RPM_CMD);
+
+    }
+    else{
     float forward = useUdp ? ly : joyY;
     float turn = useUdp ? rx : joyX;
 
-    // Combine for left and right motor base PWM
-    float pwmL_base = (forward + turn) * basePWM;
-    float pwmR_base = (forward - turn) * basePWM;
+    forward *= 0.8f;
+    turn    *= 0.8f;
 
-    // Apply PID correction only to left motor PWM to sync speeds
-    float pwmL_out = constrain(pwmL_base - correctionPWM, -4095, 4095);
-    float pwmR_out = constrain(pwmR_base, -4095, 4095);
+    // Combine for left and right motor base PWM
+    rpmTargetL = (forward + turn) * MAX_RPM_CMD;
+    rpmTargetR = (forward - turn) * MAX_RPM_CMD;
+
+    pwmFF_L = (forward + turn) * basePWM;
+    pwmFF_R = (forward - turn) * basePWM;
+    }
+
+    // Calculate error in motord
+    float errL = rpmTargetL - rpmL;
+    float errR = rpmTargetR - rpmR;
+    
+    bool satL = (pwmL_out >=  maxPWM_D) || (pwmL_out <= -maxPWM_D);
+    bool satR = (pwmR_out >=  maxPWM_D) || (pwmR_out <= -maxPWM_D);
+    if (!satL) integralL += errL * dt;
+    if (!satR) integralR += errR * dt;
+
+    // Clamp integrators a bit
+    integralL = constrain(integralL, -300.0f, 300.0f);
+    integralR = constrain(integralR, -300.0f, 300.0f);
+    float dErrL = (errL - lastErrL) / dt;
+    float dErrR = (errR - lastErrR) / dt;
+    lastErrL = errL;
+    lastErrR = errR;
+
+    float deltaPWM_L = Kp_L * errL + Ki_L * integralL + Kd_L * dErrL;
+    float deltaPWM_R = Kp_R * errR + Ki_R * integralR + Kd_R * dErrR;
+
+    // Turret control based on HTML joystick input
+    // float turretSpeed = joyturretX * maxPWM;  // or joyturretY * maxPWM;
+    // pwmT_out = turretSpeed;
+    // noInterrupts();
+    // long currentTicksT = ticksT;
+    // interrupts();
+    // currentAngleT = currentTicksT * DEGREES_PER_TURRET_TICK;
+    // currentAngleT = fmod(currentAngleT / turretGearRatio, 360.0);
+    // setMotor(pwmT, dirT, turretSpeed, 2);
+
+    if (lt > 0.1 || rt > 0.1){
+    // Simple turret control based on triggers
+      targetTurretAngle = 0.0;
+      float turretSpeed = (lt > 0.1) ? -lt * maxPWM : rt * maxPWM;
+      pwmT_out = turretSpeed;
+      currentAngleT = ticksT * DEGREES_PER_TURRET_TICK; // Calculate turret angle in degrees
+      currentAngleT = fmod(currentAngleT/turretGearRatio, 360.0);
+    }
+    else if (fabs(targetTurretAngle)>0.0f) {
+      // Turret PID control
+      // Read turret encoder counts atomically
+      noInterrupts();
+      long currentTicksT = ticksT;
+      interrupts();
+      // Calculate turret angle in degrees
+      float currentAngleT = currentTicksT * DEGREES_PER_TURRET_TICK;
+      // Calculate error for turret PID
+      float errorT = targetTurretAngle - currentAngleT;
+      if(abs(errorT) < 1.0 ) {
+        pwmT_out = 0; // Reset output if within threshold
+        integralT = 0; // Reset integral term if within threshold
+      }
+      else{
+      float dtT = (now - lastTurretTime) / 1000.0; // Time in seconds
+      if (dtT == 0) dtT = 0.001; // Avoid division by zero
+      integralT += errorT * dtT;
+      integralT = constrain(integralT, -100, 100);
+      float dErrorT = (errorT - lastErrorT) / dtT;
+      // Calculate turret PWM output
+      pwmT_out = Kp_turret * errorT + Ki_turret * integralT + Kd_turret * dErrorT;
+      pwmT_out = constrain(pwmT_out, -maxPWM, maxPWM);
+      if (abs(pwmT_out) < 400) pwmT_out = 0;
+      lastErrorT = errorT;
+      lastTurretTime = now;
+      }
+    }
+    else if ((lt < 0.1 || rt < 0.1) && (lt >= -1.5 || rt >= -1.5)) {
+      pwmT_out = 0.0;
+      pwmT_out = 0;
+    }
+
+    //// ======================== CONTROL END ===================////
 
     // Set motor speeds
     setMotor(pwmL, dirL, pwmL_out, 0);
     setMotor(pwmR, dirR, pwmR_out, 1);
+    setMotor(pwmT, dirT, pwmT_out, 2);
+
     // Calculate rotations
     float rotL = currentTicksL / (float)TICKS_PER_WHEEL_REV;
     float rotR = currentTicksR / (float)TICKS_PER_WHEEL_REV;
 
-    Serial.printf("L: %5.1f RPM | R: %5.1f RPM | Error_Turret: %5.1f  | PWM: L=%d, R=%d, T=%d | Rot: L=%.2f, R=%.2f, T_angle=%.2f\n", 
-              rpmL, rpmR, errorT, (int)pwmL_out, (int)pwmR_out, (int)pwmT_out, rotL, rotR, currentAngleT);
+    String status = String("L: ") + String(rpmL, 1) + " RPM | R: " + String(rpmR, 1) +
+                " RPM | Error_Turret: " + String(errorT, 1) +
+                " | PWM: L=" + String((int)pwmL_out) +
+                ", R=" + String((int)pwmR_out) +
+                ", T=" + String((int)pwmT_out) +
+                " | Rot: L=" + String(rotL, 2) +
+                ", R=" + String(rotR, 2) +
+                ", T_angle=" + String(currentAngleT, 2);
+    Serial.println(status);
+    // sendUDP(status);
 
   }
+
+  /////// ================= LOCALIZATION START =====================////
+
   if(now- lastOdometryTime >= ODOMETRY_INTERVAL) {
     // Update odometry every ODOMETRY_INTERVAL ms
     updateOdometry();
 
-    // Update EKF if enabled
-    if(use_ekf && (now - lastEKFTime >= EKF_INTERVAL)) {
-      ekf.updateEKF();
-      lastEKFTime = now;
-    }
-
     static unsigned long lastDetailedPrint = 0;
-    if (now - lastDetailedPrint >= 1000) { // Print every second
-      Serial.println("\n LOCALIZATION STATUS:");
-
-      if(use_ekf) {
-        Serial.println("EKF Mode: Enabled");
-        ekf.printState();
-        // Get IMU data for display
-        float roll, pitch, yaw, omega;
-        if(ekf.getIMUData(roll, pitch, yaw, omega)) {
-          Serial.printf("IMU: Roll=%.2f°, Pitch=%.2f°, Yaw=%.2f°, Omega=%.3f rad/s\n", 
-                       roll*180/PI, pitch*180/PI, yaw*180/PI, omega);
-        }
-        Serial.printf("IMU Calibrated: %s\n", ekf.isIMUCalibrated() ? "Yes" : "No");
-      } else {
-        Serial.println("ODOMETRY ONLY");
-        printPose();
-        printMotionModel();
-      }
+    if (now - lastDetailedPrint >= 2000) { // Print every 2-second
+      Serial.println("\n PROBABILISTIC ODOM ESTIMATION:");
+      printPose();
+      printMotionModel();
 
       static unsigned long lastCovPrint = 0;
       if (now - lastCovPrint >= 5000) { // Print covariance every 5 seconds
-        printCovariance();
+        // printCovariance();
         lastCovPrint = now;
       }
 
       float sample_x, sample_y, sample_theta;
       samplePose(sample_x, sample_y, sample_theta); 
-      Serial.printf("Sampled Pose: X=%.2f, Y=%.2f, Theta=%.2f\n", sample_x, sample_y, sample_theta * 180.0 / PI);
-      Serial.println("--------------------------------------------------");
+      // Serial.printf("Sampled Pose: X=%.2f, Y=%.2f, Theta=%.2f\n", sample_x, sample_y, sample_theta * 180.0 / PI);
+      // Serial.println("--------------------------------------------------");
       lastDetailedPrint = now;
     }
     lastOdometryTime = now;
   }
 }
-
 
 
