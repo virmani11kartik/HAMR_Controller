@@ -1,371 +1,164 @@
 #ifndef EKF_LOCALIZATION_H
 #define EKF_LOCALIZATION_H
-#include <Arduino.h>
+
+#include <math.h>
 #include "odometry.h"
-#include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BNO055.h>
-#include <Adafruit_BNO08x.h>
-#include <utility/imumaths.h>
-#include <cmath> 
 
-// EKF state vector: [x, y, theta, vx, vy, omega]
-const int EKF_STATE_SIZE = 6; // x, y, theta, vx, vy, omega
-const int EKF_MEASUREMENT_SIZE = 3; // x, y, theta measurements
+inline float wrapToPi(float a){
+    while(a>M_PI) a -=2.0*M_PI;
+    while(a<-M_PI) a +=2.0*M_PI;
+    return a;
+}
 
-class EKFLocalization {
-private:
-    float state[EKF_STATE_SIZE]; // State vector
-    float covariance[EKF_STATE_SIZE * EKF_STATE_SIZE]; // Covariance matrix
-    float process_noise[EKF_STATE_SIZE]; // Process noise matrix
-    float measurement_noise[EKF_MEASUREMENT_SIZE]; // Measurement noise matrix
-
-    Adafruit_BNO055 bno; // BNO055 IMU sensor
-    Adafruit_BNO08x bno08x; // BNO08x IMU sensor
-    
-    unsigned long last_update_time; // Last update time for EKF
-    bool first_update; // Flag for first update
-
-    // IMU Calibration
-    bool imu_calibrated; // Flag to check if IMU is calibrated
-    float imu_theta_offset; // Offset for IMU theta
-
-    // Odometry values
-    float prev_odo_x, prev_odo_y, prev_odo_theta; // Previous odometry values
-
-    // Matrix operations
-    void setMatrixElement(float* matrix, int size, int row, int col, float value);
-    float getMatrixElement(const float* matrix, int size, int row, int col) const;
-    void matrixMultiply(const float* A, const float* B, float* result, int rowsA, int colsA, int colsB);
-    void matrixTranspose(const float* A, float* result, int rows, int cols);
-    void matrixAdd(const float* A, const float* B, float* result, int rows, int cols);
-    void matrixInvert3x3(const float* A, float* result);
-
-    // EKF functions
-    void predictState(float dt);
-    void predictCovariance(float dt);
-    void updateWithMeasurement(const float* measurement, const float* measurement_covariance);
-    void computeJacobians(float* F, float* H, float dt);
-
-public:
-    EKFLocalization();
-    
-    //Initialize EKF
-    bool initIMU(int sda_pin = 38, int scl_pin = 39);
-    void initEKF();
-    void calibrateIMU();
-
-    void updateEKF();
-
-    float getX() const { return state[0]; }
-    float getY() const { return state[1]; }
-    float getTheta() const { return state[2]; }
-    float getVelX() const { return state[3]; }
-    float getVelY() const { return state[4]; }
-    float getOmega() const { return state[5]; }
-
-    // Get uncertainties
-    float getUncertaintyX() const;
-    float getUncertaintyY() const;
-    float getUncertaintyTheta() const;
-
-    void resetEKF();
-    void printState();
-    void printCovariance();
-    void setProcessNoise(float pos_noise, float vel_noise, float ang_noise);
-    void setMeasurementNoise(float odo_pos_noise, float imu_ang_noise);
-
-    // Get IMU data
-    bool getIMUData(float& roll, float& pitch, float& yaw, float& angular_velocity);
-    bool isIMUCalibrated();
+struct EkfYawConfig {
+    float R_yaw_rad2 = (10.0f * M_PI/180.0f) * (10.0f * M_PI/180.0f); // IMU yaw measurement noise (rad^2)
+    float gate_sigma = 3.0f;
+    float alignment_timeout_ms = 5000.0f;
+    float min_calibration_level = 2;
+    bool enable_periodic_realignment = true;
+    float realignment_threshold = 30.0f * M_PI/180.0f; 
+    int realignment_count_threshold = 10;
 };
 
-EKFLocalization::EKFLocalization() : bno(55, 0x28), last_update_time(0), first_update(true), 
-                                     imu_theta_offset(0.0), imu_calibrated(false),
-                                     prev_odo_x(0), prev_odo_y(0), prev_odo_theta(0){
-    // Initialize state vector and covariance matrix
-    for (int i = 0; i < EKF_STATE_SIZE; i++) {
-        state[i] = 0.0f;
-    }
-    for (int i = 0; i < EKF_STATE_SIZE * EKF_STATE_SIZE; i++) {
-        covariance[i] = 0.0f;
-    }
-    // Set initial covariance (diagonal elements)
-    setMatrixElement(covariance, EKF_STATE_SIZE, 0, 0, 0.01); // x
-    setMatrixElement(covariance, EKF_STATE_SIZE, 1, 1, 0.01); // y  
-    setMatrixElement(covariance, EKF_STATE_SIZE, 2, 2, 0.01); // theta
-    setMatrixElement(covariance, EKF_STATE_SIZE, 3, 3, 0.1);  // vel_x
-    setMatrixElement(covariance, EKF_STATE_SIZE, 4, 4, 0.1);  // vel_y
-    setMatrixElement(covariance, EKF_STATE_SIZE, 5, 5, 0.1);  // omega
+static bool g_aligned = false;
+static float g_yaw_offset = 0.0f;
+static unsigned long g_last_realignment_ms = 0;
+static int g_large_innovation_count = 0;
 
-    // default process noise
-    process_noise[0] = 0.01;  // x position
-    process_noise[1] = 0.01;  // y position  
-    process_noise[2] = 0.005; // theta
-    process_noise[3] = 0.1;   // vel_x
-    process_noise[4] = 0.1;   // vel_y
-    process_noise[5] = 0.05;  // omega
-
-    // default measurement noise
-    measurement_noise[0] = 0.02; // odometry x
-    measurement_noise[1] = 0.02; // odometry y
-    measurement_noise[2] = 0.01; // IMU theta
+inline void ekfYawResetAlignment() {
+    g_aligned = false;
+    g_yaw_offset = 0.0f;
+    g_last_realignment_ms = 0;
+    g_large_innovation_count = 0;
+    Serial.println("EKF: Yaw alignment reset");
 }
 
-bool EKFLocalization::initIMU(int sda_pin, int scl_pin) {
-    Wire.begin(sda_pin, scl_pin);
-    if(!bno.begin()) {
-        Serial.println("Failed to initialize BNO055!");
+// check if aligned, if not align once
+inline bool shouldRealign(float innovation, const EkfYawConfig& cfg) {
+    if (!cfg.enable_periodic_realignment) return false;
+    
+    unsigned long now = millis();
+    if (fabs(innovation) > cfg.realignment_threshold) {
+        g_large_innovation_count++;
+        if (g_large_innovation_count >= cfg.realignment_count_threshold &&
+            (now - g_last_realignment_ms) > cfg.alignment_timeout_ms) {
+            return true;
+        }
+    } else {
+        g_large_innovation_count = max(0, g_large_innovation_count - 1); // Decay counter
+    }
+    return false;
+}
+
+
+inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConfig()){
+    if (!isfinite(imu_yaw_rad)) {
+        Serial.println("EKF: Invalid IMU yaw measurement");
         return false;
     }
-    delay(1000);
-    bno.setExtCrystalUse(true);
-    Serial.println("BNO055 initialized successfully");
-    return true;
-}
 
-void EKFLocalization::initEKF() {
-    last_update_time = millis();
-    first_update = true;
-    Serial.println("EKF Localization initialized");
-}
-
-void EKFLocalization::calibrateIMU() {
-    if(!imu_calibrated) {
-        sensors_event_t event;
-        bno.getEvent(&event);
-        imu_theta_offset = event.orientation.x * PI / 180.0;
-        imu_calibrated = true;
-        Serial.printf("IMU calibrated with offset: %.3f rad\n", imu_theta_offset);
-    }
-}
-
-bool EKFLocalization::getIMUData(float& roll, float& pitch, float& yaw, float& angular_velocity) {
-    sensors_event_t orientation_event, gyro_event;
-    bno.getEvent(&orientation_event, Adafruit_BNO055::VECTOR_EULER);
-    bno.getEvent(&gyro_event, Adafruit_BNO055::VECTOR_GYROSCOPE);
-    if(orientation_event.orientation.x == 0 && orientation_event.orientation.y == 0 && orientation_event.orientation.z == 0) {
-        return false; // Invalid reading
-    }
-    roll = orientation_event.orientation.y * PI / 180.0;
-    pitch = orientation_event.orientation.z * PI / 180.0;
-    yaw = orientation_event.orientation.x * PI / 180.0;
-    angular_velocity = gyro_event.gyro.z; // Z-axis gyro for yaw rate
-    // Apply calibration offset
-    yaw -= imu_theta_offset;
-    // Normalize yaw to [-PI, PI]
-    while(yaw > PI) yaw -= 2.0 * PI;
-    while(yaw < -PI) yaw += 2.0 * PI;
-    return true;
-}
-
-bool EKFLocalization::isIMUCalibrated() {
-    uint8_t system, gyro, accel, mag;
-    bno.getCalibration(&system, &gyro, &accel, &mag);
-    return (gyro >=2 && mag >= 2);
-}
-
-void EKFLocalization::updateEKF(){
-    unsigned long current_time = millis();
-    float dt = (current_time - last_update_time) / 1000.0; // Convert to seconds
-
-    if(first_update) {
-        // Initialize state with odometry values
-        first_update = false;
-        last_update_time = current_time;
-        state[0] = getRobotX(); // Initial x position
-        state[1] = getRobotY(); // Initial y position
-        state[2] = getRobotTheta(); // Initial theta
-
-        prev_odo_x = state[0];
-        prev_odo_y = state[1];
-        prev_odo_theta = state[2];
-
-        if(!imu_calibrated) {
-            calibrateIMU(); // Calibrate IMU if not done
-        }
-        return; // Skip prediction step on first update
+    // Initial alignment or re-alignment
+    if (!g_aligned || shouldRealign(0.0f, cfg)) { // check innovation after first calculation
+        g_yaw_offset = wrapToPi(robot_theta - imu_yaw_rad);
+        g_aligned = true;
+        g_last_realignment_ms = millis();
+        g_large_innovation_count = 0;
+        Serial.printf("EKF: Yaw %saligned, offset=%.2f deg\n", 
+                     g_last_realignment_ms == 0 ? "" : "re-", 
+                     g_yaw_offset * 180.0f / M_PI);
     }
 
-    if(dt < 0.01) return; // Avoid too small dt
+    float z = wrapToPi(imu_yaw_rad + g_yaw_offset);
 
-    // Predict step
-    predictState(dt);
-    predictCovariance(dt);
+    float P[9];
+    covarianceToMatrix(covariance, P);
 
-    float measurement[EKF_MEASUREMENT_SIZE];
-    float meas_covariance[EKF_MEASUREMENT_SIZE];
+    // Innovation
+    float y = wrapToPi(z - robot_theta);
 
-    measurement[0] = getRobotX(); // Odometry x
-    measurement[1] = getRobotY(); // Odometry y
-    meas_covariance[0] = measurement_noise[0]; // Odometry x noise
-    meas_covariance[1] = measurement_noise[1]; // Odometry y noise
-
-    // Get IMU data
-    float roll, pitch, yaw, omega;
-    if(getIMUData(roll, pitch, yaw, omega)) {
-        measurement[2] = yaw; // IMU theta
-        meas_covariance[2] = measurement_noise[2]; // IMU theta noise
-        state[5] = omega; // Update omega from IMU
-        updateWithMeasurement(measurement, meas_covariance);
-    } else {
-        float odo_measurement[2] = {measurement[0], measurement[1]};
-        float odo_covariance[2] = {meas_covariance[0], meas_covariance[1]};
+    if (shouldRealign(y, cfg)) {
+        Serial.printf("EKF: Re-aligning due to large innovation: %.2f deg\n", y * 180.0f / M_PI);
+        g_yaw_offset = wrapToPi(robot_theta - imu_yaw_rad);
+        g_last_realignment_ms = millis();
+        g_large_innovation_count = 0;
+        z = wrapToPi(imu_yaw_rad + g_yaw_offset);
+        y = wrapToPi(z - robot_theta);
     }
-    last_update_time = current_time;
-}
 
-void EKFLocalization::predictState(float dt) {
-    // State transition model: 
-    // x' = x + vel_x * dt
-    // y' = y + vel_y * dt  
-    // theta' = theta + omega * dt
-    // vel_x' = vel_x (constant velocity model)
-    // vel_y' = vel_y
-    // omega' = omega
-
-    state[0] += state[3] * dt; // x
-    state[1] += state[4] * dt; // y
-    state[2] += state[5] * dt; // theta
-
-    // Normalize theta to [-PI, PI]
-    while(state[2] > PI) state[2] -= 2.0 * PI;
-    while(state[2] < -PI) state[2] += 2.0 * PI;
-
-    // Updating velocities based on odometry
-    float current_odo_x = getRobotX();
-    float current_odo_y = getRobotY();
-
-    if(dt>0.001){
-        state[3] = (current_odo_x - prev_odo_x) / dt; // vel_x
-        state[4] = (current_odo_y - prev_odo_y) / dt; // vel_y
-    }
-    prev_odo_x = current_odo_x;
-    prev_odo_y = current_odo_y;
-}
-
-void EKFLocalization::predictCovariance(float dt) {
-    float dt2 = dt * dt;
-    float current_cov[EKF_STATE_SIZE];
-    for(int i = 0; i < EKF_STATE_SIZE; i++) {
-        current_cov[i] = getMatrixElement(covariance, EKF_STATE_SIZE, i, i);
-        current_cov[i] += process_noise[i] * dt2; // Add process noise
-        setMatrixElement(covariance, EKF_STATE_SIZE, i, i, current_cov[i]);
-    }
-}
-
-void EKFLocalization::updateWithMeasurement(const float* measurement, const float* measurement_covariance) {
-    // Measurement model: H maps state to measurements
-    // z = [x_odo, y_odo, theta_imu] = [x, y, theta] from state
+    // Innovation covariance
+    float S = P[8] + cfg.R_yaw_rad2;
+    if(S<=1e-12f){
+        Serial.println("EKF: Innovation covariance too small");
+        return false;
+    } 
     
-    float innovation[EKF_MEASUREMENT_SIZE];
-    innovation[0] = measurement[0] - state[0]; // x_odo - x
-    innovation[1] = measurement[1] - state[1]; // y_odo
-    innovation[2] = measurement[2] - state[2]; // theta_imu - theta
-
-    // Normalize innovation for theta
-    while(innovation[2] > PI) innovation[2] -= 2.0 * PI;
-    while(innovation[2] < -PI) innovation[2] += 2.0 * PI;
-
-    // Innovation Covariance
-    float S[EKF_MEASUREMENT_SIZE];
-    S[0] = getMatrixElement(covariance, EKF_STATE_SIZE, 0, 0) + measurement_covariance[0]; // σxx + odo_x_noise
-    S[1] = getMatrixElement(covariance, EKF_STATE_SIZE, 1, 1) + measurement_covariance[1]; // σyy + odo_y_noise
-    S[2] = getMatrixElement(covariance, EKF_STATE_SIZE, 2, 2) + measurement_covariance[2]; // σθθ + imu_theta_noise
-
-    // Kalman Gain
-    float K[EKF_STATE_SIZE * EKF_MEASUREMENT_SIZE];
-    for(int i = 0; i < EKF_STATE_SIZE; i++) {
-        for(int j = 0; j < EKF_MEASUREMENT_SIZE; j++) {
-            K[i * EKF_MEASUREMENT_SIZE + j] = 0.0f;
+    // Mahalanobis distance for gating
+    if(cfg.gate_sigma > 0.0f){
+        float maha2 = (y * y) / S;
+        if (maha2 > cfg.gate_sigma * cfg.gate_sigma) {
+            Serial.printf("EKF: Measurement gated, Maha=%.2f > %.2f\n", 
+                         sqrt(maha2), cfg.gate_sigma);
+            return false;
         }
     }
 
-    // Set Kalman Gain
-    if(S[0] > 1e-6) K[0*EKF_MEASUREMENT_SIZE + 0] = getMatrixElement(covariance, EKF_STATE_SIZE, 0, 0) / S[0]; // K_x
-    if(S[1] > 1e-6) K[1*EKF_MEASUREMENT_SIZE + 1] = getMatrixElement(covariance, EKF_STATE_SIZE, 1, 1) / S[1]; // K_y
-    if(S[2] > 1e-6) K[2*EKF_MEASUREMENT_SIZE + 2] = getMatrixElement(covariance, EKF_STATE_SIZE, 2, 2) / S[2]; // K_theta
+    // Kalman gain K = P H^T / S = [P(x,θ), P(y,θ), P(θ,θ)]^T / S
+    float Kx = P[2] / S;  // P(x,θ)
+    float Ky = P[5] / S;  // P(y,θ)
+    float Kt = P[8] / S;  // P(θ,θ)
 
-    // Update state with innovation
-    for(int i = 0; i < EKF_STATE_SIZE; i++) {
-        for(int j = 0; j < EKF_MEASUREMENT_SIZE; j++) {
-            state[i] += K[i * EKF_MEASUREMENT_SIZE + j] * innovation[j];
-        }
-    }
+    // State update
+    robot_x    += Kx * y;
+    robot_y    += Ky * y;
+    robot_theta= wrapToPi(robot_theta + Kt * y);
 
-    // Normalize theta to [-PI, PI]
-    while(state[2] > PI) state[2] -= 2.0 * PI;
-    while(state[2] < -PI) state[2] += 2.0 * PI;
+    // P <- (I-KH)P(I-KH)^T + K R K^T ; with H=[0 0 1]
+    float HP[3] = {P[2], P[5], P[8]};
 
-    // Update covariance
-    for(int i=0; i<min(EKF_STATE_SIZE, EKF_MEASUREMENT_SIZE); i++) {
-        float current_var = getMatrixElement(covariance, EKF_STATE_SIZE, i, i);
-        float updated_var = current_var * (1 - K[i * EKF_MEASUREMENT_SIZE + i]);
-        setMatrixElement(covariance, EKF_STATE_SIZE, i, i, max(updated_var, 1e-6f)); // Ensure positive definiteness
-    }
+    // Update covariance: P = P - K*(H*P)
+    // Row 0: P(x,·)
+    P[0] -= Kx * HP[0]; // P(x,x)
+    P[1] -= Kx * HP[1]; // P(x,y)
+    P[2] -= Kx * HP[2]; // P(x,θ)
+    
+    // Row 1: P(y,·) - FIXED INDEXING
+    P[3] -= Ky * HP[1]; // P(y,y) - was incorrectly HP[0]
+    P[4] -= Ky * HP[2]; // P(y,θ) - was incorrectly HP[1]
+    
+    // Row 2: P(θ,·)
+    P[6] -= Kt * HP[0]; // P(θ,x)
+    P[7] -= Kt * HP[1]; // P(θ,y)
+    P[8] -= Kt * HP[2]; // P(θ,θ)
+
+    // Add K*R*K^T term for numerical stability
+    float R = cfg.R_yaw_rad2;
+    P[0] += Kx * Kx * R; // P(x,x)
+    P[1] += Kx * Ky * R; // P(x,y)
+    P[2] += Kx * Kt * R; // P(x,θ)
+    P[3] += Ky * Ky * R; // P(y,y)
+    P[4] += Ky * Kt * R; // P(y,θ)
+    P[6] += Kt * Kx * R; // P(θ,x)  
+    P[7] += Kt * Ky * R; // P(θ,y)
+    P[8] += Kt * Kt * R; // P(θ,θ)
+
+    // Ensure symmetry (numerical precision)
+    P[3] = P[1]; // P(y,x) = P(x,y)
+    P[6] = P[2]; // P(θ,x) = P(x,θ)
+    P[7] = P[4]; // P(θ,y) = P(y,θ)
+
+    matrixToCovariance(P, covariance);
+    covariance[0] = fmaxf(covariance[0], 1e-9f);
+    covariance[3] = fmaxf(covariance[3], 1e-9f);
+    covariance[5] = fmaxf(covariance[5], 1e-9f);
+
+
+    return true; // Measurement accepted and state updated
 }
 
-void EKFLocalization::setMatrixElement(float* matrix, int size, int row, int col, float value) {
-    matrix[row * size + col] = value;
+inline void getEkfAlignmentInfo(bool& is_aligned, float& offset_deg, unsigned long& last_alignment_ms) {
+    is_aligned = g_aligned;
+    offset_deg = g_yaw_offset * 180.0f / M_PI;
+    last_alignment_ms = g_last_realignment_ms;
 }
 
-float EKFLocalization::getMatrixElement(const float* matrix, int size, int row, int col) const {
-    return matrix[row * size + col];
-}
-
-float EKFLocalization::getUncertaintyX() const {
-    return sqrt(getMatrixElement(covariance, EKF_STATE_SIZE, 0, 0));
-}
-
-float EKFLocalization::getUncertaintyY() const {
-    return sqrt(getMatrixElement(covariance, EKF_STATE_SIZE, 1, 1));
-}
-
-float EKFLocalization::getUncertaintyTheta() const {
-    return sqrt(getMatrixElement(covariance, EKF_STATE_SIZE, 2, 2));
-}
-
-void EKFLocalization::resetEKF(){
-    for(int i = 0; i < EKF_STATE_SIZE; i++) {
-        state[i] = 0.0f; // Reset state
-    }
-    for (int i = 0; i < EKF_STATE_SIZE * (EKF_STATE_SIZE + 1) / 2; i++) {
-        covariance[i] = 0.0f; // Reset covariance
-    }
-
-    // Set initial covariance (diagonal elements)
-    setMatrixElement(covariance, EKF_STATE_SIZE, 0, 0, 0.01); // x
-    setMatrixElement(covariance, EKF_STATE_SIZE, 1, 1, 0.01); // y
-    setMatrixElement(covariance, EKF_STATE_SIZE, 2, 2, 0.01); // theta
-    setMatrixElement(covariance, EKF_STATE_SIZE, 3, 3, 0.1);  // vel_x
-    setMatrixElement(covariance, EKF_STATE_SIZE, 4, 4, 0.1);  // vel_y
-    setMatrixElement(covariance, EKF_STATE_SIZE, 5, 5, 0.1);  // omega
-
-    first_update = true; // Reset first update flag
-    imu_calibrated = false; // Reset IMU calibration flag
-}
-
-void EKFLocalization::printState() {
-    Serial.printf("EKF State - X: %.4f±%.4f, Y: %.4f±%.4f, Theta: %.2f±%.2f°, Vel: %.3f,%.3f, Omega: %.3f\n",
-                  state[0], getUncertaintyX(),
-                  state[1], getUncertaintyY(),
-                  state[2] * 180.0 / PI, getUncertaintyTheta() * 180.0 / PI,
-                  state[3], state[4], state[5]);
-}
-
-void EKFLocalization::setProcessNoise(float pos_noise, float vel_noise, float ang_noise) {
-    process_noise[0] = pos_noise;  // x position
-    process_noise[1] = pos_noise;  // y position  
-    process_noise[2] = ang_noise;   // theta
-    process_noise[3] = vel_noise;   // vel_x
-    process_noise[4] = vel_noise;   // vel_y
-    process_noise[5] = ang_noise;   // omega
-}
-
-void EKFLocalization::setMeasurementNoise(float odo_pos_noise, float imu_ang_noise) {
-    measurement_noise[0] = odo_pos_noise; // odometry x
-    measurement_noise[1] = odo_pos_noise; // odometry y
-    measurement_noise[2] = imu_ang_noise;  // IMU theta
-}
-
-#endif
+#endif // EKF_LOCALIZATION_H
