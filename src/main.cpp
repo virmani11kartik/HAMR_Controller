@@ -17,6 +17,9 @@
 #include "odometry.h"
 #include <string.h>
 #include "pid_webpage.h"
+#include "imu_55.h"
+#include "imu_85.h"
+#include "ekf_localization.h"
 
 WebServer server(80);
 
@@ -27,6 +30,8 @@ const char* password = "123571113";
 //------------IMU OBJECT--------------
 IMU55 sens;                 // SDA=4, SCL=5, addr=0x28 by default
 float roll_b,pitch_b,yaw_b;
+//------------EKF CONFIG--------------
+EkfYawConfig cfg;
 
 //---------------------------GLOBALS----------------------
 // UDP SETUP
@@ -50,10 +55,6 @@ const int pwmT = 7;
 const int dirT = 6;   
 const int enAT = 5;
 const int enBT = 4;
-
-// IMU pins
-const int IMU_SDA = 38; 
-const int IMU_SCL = 39;
 
 // Encoder counts (volatile for ISR)
 volatile long ticksL = 0;
@@ -246,6 +247,16 @@ void setMotor(int pwmPin, int dirPin, float pwmVal, int channel) {
   }
 }
 
+//---------------------------UDP TRANSMISSION (IF WIFI)-------------
+void sendUDP(String msg) {
+  if (remoteIP && remotePort) {
+    udp.beginPacket(remoteIP, remotePort);
+    udp.print(msg);
+    udp.endPacket();
+  }
+}
+
+//---------------------------ODOM SET---------------------------
 void setupProbabilisticEndpoints() {
   // Endpoint to get current pose with uncertainty
   server.on("/pose", HTTP_GET, []() {
@@ -279,87 +290,79 @@ void setupProbabilisticEndpoints() {
   });
 }
 
+//-----------------------------------ESP SETUP-------------------------
 void setup() {
 
-  Serial.begin(115200);
-  Serial.println("ESP32 Ready");
-  initOdometry(); // Initialize odometry
-  WiFi.softAP(ssid, password, 5, 0, 2);
+  Serial.begin(115200);   // USB CDC logs
+  Serial0.begin(460800);
+  Serial.println("ESP32 bidirectional UART Ready");
+  Serial.println("Pulling Micro-ROS");
+
+  // ----------------Initialize odometry--------------
+  initOdometry(); 
+  cfg.R_yaw_rad2 = sq(12.0f * M_PI / 180.0f);
+  cfg.gate_sigma = 3.0f;  // set <=0 to disable gating
+
+  // ----------------WIFI SETUP-----------------------
+  WiFi.softAP(ssid, password, 4, 0, 2);
   IPAddress myIP = WiFi.softAPIP();
   Serial.print("ESP IP: ");
   Serial.println(myIP);
   
 
+  //--------------------------------ESP SERVER---------------------------
   server.on("/", HTTP_GET, []() {
-    server.send(200, "text/html", webpage);  // Serve the HTML page
+    server.send(200, "text/html", pid_webpage);  // Serve the HTML page
   });
-  // server.on("/move", HTTP_GET, []() {
-  //   String xVal = server.arg("x");
-  //   String yVal = server.arg("y");
-  //   joyX= xVal.toFloat();
-  //   joyY= -yVal.toFloat();
-  //   Serial.printf("Joystick X: %.2f, Y: %.2f\n", joyX, joyY);
-  //   server.send(200, "text/plain", "OK");
-  // });
-  // Joystick movement (single virtual joystick)
-server.on("/move", HTTP_GET, []() {
-  float x = server.arg("x").toFloat();
-  float y = server.arg("y").toFloat();
-  joyX = x;
-  joyY = -y;
-  server.send(200, "text/plain", "Movement received");
-});
+  
+  server.on("/move", HTTP_GET, []() {
+    float x = server.arg("x").toFloat();
+    float y = server.arg("y").toFloat();
+    joyX = x;
+    joyY = -y;
+    server.send(200, "text/plain", "Movement received");
+  });
 
 // Trigger buttons: LT or RT
-server.on("/trigger", HTTP_GET, []() {
-  String btn = server.arg("btn");
-  float value = server.arg("value").toFloat();  // Use 'value' param
-
-  if (btn == "lt") {
-    pwmT_out = -value * maxPWM;
-  } else if (btn == "rt") {
-    pwmT_out = value * maxPWM;
-  } else if (btn == "stop") {
-    pwmT_out = 0;
-  }
-
-  setMotor(pwmT, dirT, pwmT_out, 2);
-  server.send(200, "text/plain", "Trigger received: " + btn);
-});
+  server.on("/trigger", HTTP_GET, []() {
+    btn = server.arg("btn");
+    value = server.arg("value").toFloat();  // Use 'value' param
+    server.send(200, "text/plain", "Trigger received: " + btn);
+  });
 
 // Turret angle input
-server.on("/setTurretAngle", HTTP_GET, []() {
-  float angle = server.arg("angle").toFloat();
-  inputTurretAngle = angle;
-  targetTurretAngle = inputTurretAngle * turretGearRatio; // Apply gear ratio
-  server.send(200, "text/plain", "Turret angle set.");
-});
+  server.on("/setTurretAngle", HTTP_GET, []() {
+    float angle = server.arg("angle").toFloat();
+    inputTurretAngle = -angle;
+    targetTurretAngle = inputTurretAngle * turretGearRatio; // Apply gear ratio
+    server.send(200, "text/plain", "Turret angle set.");
+  });
+
+  // GET current values (already suggested)
+  server.on("/getPID", HTTP_GET, []() {
+    String json = "{";
+    json += "\"Kp\":" + String(Kp_R) + ",";
+    json += "\"Ki\":" + String(Ki_R) + ",";
+    json += "\"Kd\":" + String(Kd_R) + ",";
+    json += "\"Test\":" + String(test, 4); // 4 decimals for float
+    json += "}";
+    server.send(200, "application/json", json);
+  });
+
+  // POST updates
+  server.on("/updatePID", HTTP_POST, []() {
+    if (server.hasArg("Kp")) Kp_R = server.arg("Kp").toFloat();
+    if (server.hasArg("Ki")) Ki_R = server.arg("Ki").toFloat();
+    if (server.hasArg("Kd")) Kd_R = server.arg("Kd").toFloat();
+    if (server.hasArg("Test")) test = server.arg("Test").toFloat();
+    String response = "Updated PID values:\nKp=" + String(Kp_L) + "\nKi=" + String(Ki_L) + "\nKd=" + String(Kd_L) +
+                      "\nTest=" + String(test, 4);
+    server.send(200, "text/plain", response);
+  });
 
   server.onNotFound([]() {
     server.send(404, "text/plain", "404 Not Found");
   });
-}
-
-void setup() {
-
-  Serial.begin(115200);
-  Serial.println("ESP32 Ready");
-
-  initOdometry(); // Initialize odometry
-  if (ekf.initIMU(IMU_SDA, IMU_SCL)) {
-    ekf.initEKF();
-    Serial.println("EKF and IMU initialized successfully");
-  } else {
-    Serial.println("Warning: IMU initialization failed, using odometry only");
-    use_ekf = false;
-  }
-
-  WiFi.softAP(ssid, password, 5, 0, 2);
-  IPAddress myIP = WiFi.softAPIP();
-  Serial.print("ESP IP: ");
-  Serial.println(myIP);
-
-  setupWebServerEndpoints(); // Setup web server endpoints
   server.begin();
   Serial.println("HTTP server started");
   udp.begin(port);
@@ -413,6 +416,8 @@ void setup() {
     Serial.println("IMU init failed. Check wiring/address.");
     while (1) delay(1000);
   }
+  // sens.setMinCalibrationLevel(2); 
+  // sens.setDataTimeout(1000);
 }
 
 void loop() {
@@ -654,7 +659,7 @@ void loop() {
     
     if (useUart) {
       // UART cmd is platform angular velocity [rad/s]
-      const float target_rpm_T_platform = wheel_rpm_from_cmd(uart_turret_cmd) * (60.0f / (2.0f * (float)M_PI));
+      const float target_rpm_T_platform = wheel_rpm_from_cmd(uart_turret_cmd);
 
       // Simple PI on platform velocity
       static float integTv = 0.0f;
@@ -745,30 +750,55 @@ void loop() {
 
   if(now- lastOdometryTime >= ODOMETRY_INTERVAL) {
     // Update odometry every ODOMETRY_INTERVAL ms
-    updateOdometry();
+    updateOdometry(); // KF-Prediction step
+    ekfYawUpdate(yaw_b, cfg);//KF - Update step updates robot_x, robot_y, robot_theta, covariance
+    // updateSampledPoseFromLastDelta();
 
-    static unsigned long lastDetailedPrint = 0;
-    if (now - lastDetailedPrint >= 1000) { // Print every 1-second
-      Serial.println("\n PROBABILISTIC ODOM ESTIMATION:");
-      printPose();
-      // printMotionModel();
+    // static unsigned long lastDetailedPrint = 0;
+    // if (now - lastDetailedPrint >= 1000) { // Print every 1-second
+    //   Serial.println("\n PROBABILISTIC ODOM ESTIMATION:");
+    //   printPose();
+    //   printMotionModel();
 
     //   static unsigned long lastCovPrint = 0;
     //   if (now - lastCovPrint >= 5000) { // Print covariance every 5 seconds
-    //     // printCovariance();
+    //     printCovariance();
     //     lastCovPrint = now;
     //   }
 
     //   float sample_x, sample_y, sample_theta;
     //   samplePose(sample_x, sample_y, sample_theta); 
-    //   // Serial.printf("Sampled Pose: X=%.2f, Y=%.2f, Theta=%.2f\n", sample_x, sample_y, sample_theta * 180.0 / PI);
-    //   // Serial.println("--------------------------------------------------");
+    //   Serial.printf("Sampled Pose: X=%.2f, Y=%.2f, Theta=%.2f\n", sample_x, sample_y, sample_theta * 180.0 / PI);
+    //   Serial.println("--------------------------------------------------");
     //   lastDetailedPrint = now;
+    // }
+
+    // if (sens.getStatus() == IMU_OK && sens.isDataValid()) {
+    //     bool ekf_success = ekfYawUpdate(yaw_b, cfg);
+    //     static int ekf_accept_count = 0;
+    //     static int ekf_total_count = 0;
+    //     static unsigned long last_ekf_stats = 0;
+    //     ekf_total_count++;
+    //     if (ekf_success) ekf_accept_count++;
+    //     if (millis() - last_ekf_stats > 10000) { // Every 10 seconds
+    //         Serial.printf("EKF Stats: %d/%d (%.1f%%) measurements accepted\n",
+    //                      ekf_accept_count, ekf_total_count, 
+    //                      100.0f * ekf_accept_count / ekf_total_count);
+    //         bool aligned;
+    //         float offset;
+    //         unsigned long last_align;
+    //         getEkfAlignmentInfo(aligned, offset, last_align);
+    //         Serial.printf("EKF Alignment: %s, offset=%.1f°, age=%lums\n",
+    //                      aligned ? "YES" : "NO", offset, millis() - last_align);
+            
+    //         last_ekf_stats = millis();
+    //     }
+    // } else {
+    //     Serial.println("EKF: Using odometry only (IMU not ready)");
     // }
     lastOdometryTime = now;
   }
 }
-
 
 
 

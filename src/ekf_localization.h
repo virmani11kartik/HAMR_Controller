@@ -6,7 +6,6 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <Adafruit_BNO08x.h>
-#include <Adafruit_ICM20948.h>
 #include <utility/imumaths.h>
 #include <cmath> 
 
@@ -23,8 +22,7 @@ private:
 
     Adafruit_BNO055 bno; // BNO055 IMU sensor
     Adafruit_BNO08x bno08x; // BNO08x IMU sensor
-    Adafruit_ICM20948 icm20948; // ICM20948 IMU sensor
-
+    
     unsigned long last_update_time; // Last update time for EKF
     bool first_update; // Flag for first update
 

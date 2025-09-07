@@ -24,10 +24,10 @@ const float WHEEL_BASE = 0.297;               // meters between wheels
 // Probabilistic Motion Model parameters 
 // TUNABLE FOR ROBOT
 // Noise Characteristics
-const float ALPHA1 = 0.1;    // Rotational error due to rotation (rad²/rad²)
-const float ALPHA2 = 0.01;   // Rotational error due to translation (rad²/m²)
-const float ALPHA3 = 0.01;   // Translational error due to translation (m²/m²)
-const float ALPHA4 = 0.1;    // Translational error due to rotation (m²/rad²)
+float ALPHA1 = 0.1;    // Rotational error due to rotation (rad²/rad²)
+float ALPHA2 = 0.01;   // Rotational error due to translation (rad²/m²)
+float ALPHA3 = 0.01;   // Translational error due to translation (m²/m²)
+float ALPHA4 = 0.1;    // Translational error due to rotation (m²/rad²)
 
 // // Conservative settings (more uncertainty)
 // const float ALPHA1 = 0.2;    // If your robot has wheel slip
@@ -415,7 +415,7 @@ void getCovariance(float cov[6]){
 void setNoiseParameters(float a1, float a2, float a3, float a4) {
     ALPHA1=a1; ALPHA2=a2; ALPHA3=a3; ALPHA4=a4;
     Serial.printf("Setting noise parameters: ALPHA1=%.4f, ALPHA2=%.4f, ALPHA3=%.4f, ALPHA4=%.4f\n", 
-                  alpha1, alpha2, alpha3, alpha4);
+                  a1, a2, a3, a4);
 }
 
 #endif // ODOMETRY_H
