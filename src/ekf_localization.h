@@ -77,7 +77,7 @@ inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConf
     float y = wrapToPi(z - robot_theta);
 
     if (shouldRealign(y, cfg)) {
-        Serial.printf("EKF: Re-aligning due to large innovation: %.2f deg\n", y * 180.0f / M_PI);
+        // Serial.printf("EKF: Re-aligning due to large innovation: %.2f deg\n", y * 180.0f / M_PI);
         g_yaw_offset = wrapToPi(robot_theta - imu_yaw_rad);
         g_last_realignment_ms = millis();
         g_large_innovation_count = 0;
@@ -88,7 +88,7 @@ inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConf
     // Innovation covariance
     float S = P[8] + cfg.R_yaw_rad2;
     if(S<=1e-12f){
-        Serial.println("EKF: Innovation covariance too small");
+        // Serial.println("EKF: Innovation covariance too small");
         return false;
     } 
     
@@ -96,8 +96,8 @@ inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConf
     if(cfg.gate_sigma > 0.0f){
         float maha2 = (y * y) / S;
         if (maha2 > cfg.gate_sigma * cfg.gate_sigma) {
-            Serial.printf("EKF: Measurement gated, Maha=%.2f > %.2f\n", 
-                         sqrt(maha2), cfg.gate_sigma);
+            // Serial.printf("EKF: Measurement gated, Maha=%.2f > %.2f\n", 
+            //              sqrt(maha2), cfg.gate_sigma);
             return false;
         }
     }

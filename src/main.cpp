@@ -28,7 +28,7 @@ const char* ssid = "HAMR";
 const char* password = "123571113";
 
 //------------IMU OBJECT--------------
-IMU55 sens;                 // SDA=4, SCL=5, addr=0x28 by default
+IMU55 sens(33,34);                 // SDA=4, SCL=5, addr=0x28 by default
 float roll_b,pitch_b,yaw_b;
 //------------EKF CONFIG--------------
 EkfYawConfig cfg;
@@ -98,7 +98,7 @@ float pwmL_out = 0.0;
 float pwmR_out = 0.0;
 
 // Control interval (ms)
-const unsigned long PID_INTERVAL = 50;
+const unsigned long PID_INTERVAL = 10;
 static unsigned long lastUdpTime = 0;
 
 // PID state variables
@@ -472,8 +472,8 @@ void loop() {
   //=======IMU_BASE READ=======
     sens.update();
     sens.getRPY(roll_b,pitch_b,yaw_b);
-    Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
-    Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
+    // Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
+    // Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
 
   //-------------------------MICRO_ROS_PROTCOL-------------------------------
   // ---- RX: parse commands (robust to CMD or CMD3) ----
@@ -795,7 +795,7 @@ void loop() {
 
   }
   
-  delay(100);
+  // delay(100);
 
   /////// ================= LOCALIZATION START =====================////
 
@@ -809,7 +809,7 @@ void loop() {
     // static unsigned long lastDetailedPrint = 0;
     // if (now - lastDetailedPrint >= 1000) { // Print every 1-second
     //   Serial.println("\n PROBABILISTIC ODOM ESTIMATION:");
-    //   printPose();
+      printPose();
     //   printMotionModel();
 
     //   static unsigned long lastCovPrint = 0;
