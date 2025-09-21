@@ -7,7 +7,7 @@
 
 class IMU_85 {
 public:
-    IMU_85(uint8_t sda_pin = 4, uint8_t scl_pin = 5, uint32_t i2c_freq = 100000);
+    IMU_85(uint8_t sda_pin = 5, uint8_t scl_pin = 4, uint32_t i2c_freq = 100000);
     bool begin();
     bool readOrientation(float& roll, float& pitch, float& yaw, float& accuracy);
     bool dataAvailable();
@@ -32,33 +32,3 @@ private:
 #endif // IMU_85_H
 
 /// MAIN CODE ///
-// #include <Arduino.h>
-// #include "imu_85.h"
-
-// IMU_85 sense;
-
-// static const uint16_t SAMPLE_MS = 100;
-
-// void setup() {
-//     Serial.begin(115200);
-//     while (!Serial) {}
-//     if (!sense.begin()) {
-//         Serial.println("Failed to initialize IMU!");
-//         while (1) delay(1000);
-//     }
-//     Serial.println("IMU ready!");
-// }
-
-// void loop() {
-//     float roll, pitch, yaw, accuracy;
-//     if (sense.readOrientation(roll, pitch, yaw, accuracy)) {
-//         Serial.print("Roll: "); Serial.print(roll, 2); Serial.print("° | ");
-//         Serial.print("Pitch: "); Serial.print(pitch, 2); Serial.print("° | ");
-//         Serial.print("Yaw: "); Serial.print(yaw, 2); Serial.print("° | ");
-//         Serial.print("Acc(rad): "); Serial.println(accuracy, 3);
-//     } else {
-//         Serial.println("No data");
-//     }
-    
-//     delay(SAMPLE_MS);
-// }

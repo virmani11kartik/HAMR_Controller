@@ -5,7 +5,7 @@ IMU_85::IMU_85(uint8_t sda_pin, uint8_t scl_pin, uint32_t i2c_freq)
 }
 
 bool IMU_85::begin() {
-    Serial.println("Initializing BNO085 IMU...");
+    Serial0.println("Initializing BNO085 IMU...");
     
     i2cInit();
     Wire.begin(_sda_pin, _scl_pin, _i2c_freq);
@@ -14,20 +14,20 @@ bool IMU_85::begin() {
     
     bool ok = _bno08x.begin_I2C(BNO08X_ADDR_PRIMARY, &Wire);
     if (!ok) {
-        Serial.println("Primary addr 0x4B not found; trying 0x4A...");
+        Serial0.println("Primary addr 0x4B not found; trying 0x4A...");
         ok = _bno08x.begin_I2C(BNO08X_ADDR_SECONDARY, &Wire);
     }
     if (!ok) {
-        Serial.println("No BNO08x detected on I2C (0x4B/0x4A). Check wiring/power.");
+        Serial0.println("No BNO08x detected on I2C (0x4B/0x4A). Check wiring/power.");
         return false;
     }
-    Serial.println("BNO08x found.");
+    Serial0.println("BNO08x found.");
     
     if (!enableRotationVector()) {
-        Serial.println("Failed to enable rotation vector report!");
+        Serial0.println("Failed to enable rotation vector report!");
         return false;
     }
-    Serial.println("BNO085 IMU initialized successfully.");
+    Serial0.println("BNO085 IMU initialized successfully.");
     return true;
 }
 
@@ -35,7 +35,7 @@ bool IMU_85::enableRotationVector(uint32_t interval_us) {
     if (!_bno08x.enableReport(ORI_REPORT, interval_us)) {
         return false;
     }
-    Serial.println("Rotation Vector report enabled.");
+    Serial0.println("Rotation Vector report enabled.");
     return true;
 }
 
