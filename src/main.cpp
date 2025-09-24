@@ -7,19 +7,23 @@
 
 
 static const char* AP_SSID = "HAMR-SSH";
-static const char* AP_PASS = "hamr";
+static const char* AP_PASS = "123571113";
 IPAddress ap_ip(192, 168, 50, 1);
 IPAddress ap_gw(192, 168, 50, 1);
 IPAddress ap_netmask(255, 255, 255, 0);
 
-IMU_85 sense;
+IMU_85 sense(1, 0); // SDA, SCL
 
 // CAN pins & bit rate
-static const gpio_num_t CAN_TX_PIN = GPIO_NUM_18;
-static const gpio_num_t CAN_RX_PIN = GPIO_NUM_19;
+static const gpio_num_t CAN_TX_PIN = GPIO_NUM_19;
+static const gpio_num_t CAN_RX_PIN = GPIO_NUM_18;
 static const int CAN_HZ = 500000; 
 
 static const uint16_t SAMPLE_MS = 100; // 10 Hz
+
+bool can_ok = false;
+bool imu_ok = false;
+bool ap_ok  = false;
 
 // Pack three float degrees into 8 bytes: int16[3] centi-deg + 2 spare
 // roll, pitch, yaw ∈ degrees, scale by 100
@@ -51,6 +55,7 @@ void can_init() {
   if (err != ESP_OK) {
     Serial0.printf("[CAN] start failed: %d\n", (int)err);
   } else {
+    can_ok = true;
     Serial0.println("[CAN] started at 500 kbit/s");
   }
 }
@@ -81,6 +86,7 @@ static void ap_init() {
   }
   if (WiFi.softAP(AP_SSID, AP_PASS, 6, 0, 4)) {
     delay(100);
+    ap_ok = true;
     Serial0.println("[AP] SoftAP started");
   } else {
     Serial0.println("[AP] SoftAP start FAILED");
@@ -96,15 +102,26 @@ void setup() {
   delay(100);
   Serial0.println("\n[BOOT] ESP32-C3 IMU→CAN");
 
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW); 
+
   ap_init();
 
   if (!sense.begin()) {
     Serial0.println("[ERROR] IMU init failed; continuing so CAN still starts");
   } else {
+    imu_ok = true;
     Serial0.println("[OK] IMU ready");
   }
 
   can_init();
+
+  if (imu_ok && can_ok && ap_ok) {
+    digitalWrite(LED_BUILTIN, HIGH);
+    Serial0.println("[LED] Green LED ON: system OK");
+  } else {
+    Serial0.println("[LED] Not all systems OK, LED remains OFF");
+  }
 }
 
 void loop() {
