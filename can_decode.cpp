@@ -3,12 +3,10 @@
 #include <cstring>
 #include <cstdlib>
 #include <cerrno>
-
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-
 #include <linux/can.h>
 #include <linux/can/raw.h>
 #include <net/if.h>
@@ -18,8 +16,7 @@ int main() {
     int sock;
     struct ifreq ifr;
     struct sockaddr_can addr;
-
-    // Create CAN RAW socket
+    
     if ((sock = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0) {
         perror("socket");
         return 1;

@@ -2,6 +2,16 @@
 #include "imu_85.h"
 #include "driver/twai.h"
 
+#include <WiFi.h>
+#include "esp_wifi.h"
+
+
+static const char* AP_SSID = "HAMR-SSH";
+static const char* AP_PASS = "hamr";
+IPAddress ap_ip(192, 168, 50, 1);
+IPAddress ap_gw(192, 168, 50, 1);
+IPAddress ap_netmask(255, 255, 255, 0);
+
 IMU_85 sense;
 
 // CAN pins & bit rate
@@ -63,10 +73,30 @@ bool can_send_rpy(float roll, float pitch, float yaw) {
   return true;
 }
 
+static void ap_init() {
+  WiFi.mode(WIFI_MODE_AP);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  if (!WiFi.softAPConfig(ap_ip, ap_gw, ap_netmask)) {
+    Serial0.println("[AP] softAPConfig failed; continuing with default 192.168.4.1");
+  }
+  if (WiFi.softAP(AP_SSID, AP_PASS, 6, 0, 4)) {
+    delay(100);
+    Serial0.println("[AP] SoftAP started");
+  } else {
+    Serial0.println("[AP] SoftAP start FAILED");
+  }
+  IPAddress ip = WiFi.softAPIP();
+  Serial0.printf("[AP] SSID: %s  PASS: %s  IP: %s\n", AP_SSID, AP_PASS, ip.toString().c_str());
+  Serial0.println("[AP] Connect your Laptop and Raspberry Pi to this SSID.");
+  Serial0.println("[AP] Then SSH from Laptop to Pi using the Pi's AP-assigned IP (e.g. ssh pi@192.168.50.10).");
+}
+
 void setup() {
   Serial0.begin(115200);
   delay(100);
   Serial0.println("\n[BOOT] ESP32-C3 IMU→CAN");
+
+  ap_init();
 
   if (!sense.begin()) {
     Serial0.println("[ERROR] IMU init failed; continuing so CAN still starts");
