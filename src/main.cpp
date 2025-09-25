@@ -1,3 +1,5 @@
+
+#include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 #include "imu_85.h"
 #include "driver/twai.h"
@@ -5,6 +7,8 @@
 #include <WiFi.h>
 #include "esp_wifi.h"
 
+#define RGB_PIN 2          // M5Stamp C3 onboard NeoPixel on GPIO 2
+Adafruit_NeoPixel led(1, RGB_PIN, NEO_GRB + NEO_KHZ800);
 
 static const char* AP_SSID = "HAMR-SSH";
 static const char* AP_PASS = "123571113";
@@ -84,7 +88,7 @@ static void ap_init() {
   if (!WiFi.softAPConfig(ap_ip, ap_gw, ap_netmask)) {
     Serial0.println("[AP] softAPConfig failed; continuing with default 192.168.4.1");
   }
-  if (WiFi.softAP(AP_SSID, AP_PASS, 6, 0, 4)) {
+  if (WiFi.softAP(AP_SSID, AP_PASS, 6, 0, 3)) {
     delay(100);
     ap_ok = true;
     Serial0.println("[AP] SoftAP started");
@@ -102,8 +106,10 @@ void setup() {
   delay(100);
   Serial0.println("\n[BOOT] ESP32-C3 IMU→CAN");
 
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW); 
+  led.begin();
+  led.setBrightness(128);  
+  led.clear();
+  led.show();
 
   ap_init();
 
@@ -117,10 +123,11 @@ void setup() {
   can_init();
 
   if (imu_ok && can_ok && ap_ok) {
-    digitalWrite(LED_BUILTIN, HIGH);
+    led.setPixelColor(0, led.Color(20, 255, 20)); led.show();
     Serial0.println("[LED] Green LED ON: system OK");
   } else {
-    Serial0.println("[LED] Not all systems OK, LED remains OFF");
+    led.setPixelColor(0, led.Color(255, 0, 0)); led.show(); delay(500);
+    Serial0.println("[LED] Not all systems OK");
   }
 }
 
