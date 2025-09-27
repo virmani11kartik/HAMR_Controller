@@ -19,6 +19,8 @@ void IMU55::i2c_init(int sda, int scl) {
 
 bool IMU55::begin() {
   Serial.println("Init BNO055…");
+  status_ = IMU_INIT_FAILED;
+
   i2c_init(sda_, scl_);
   Wire.begin(sda_, scl_, 100000);
   Wire.setTimeOut(50);
@@ -26,7 +28,14 @@ bool IMU55::begin() {
 
   Serial.printf("Probing 0x%02X… ", addr_);
   Wire.beginTransmission(addr_);
-  Serial.printf("err=%u\n", Wire.endTransmission(true));
+  uint8_t error = Wire.endTransmission(true);
+  Serial.printf("err=%u\n", error);
+
+  if (error != 0) {
+    status_ = IMU_COMM_ERROR;
+    Serial.println("IMU: I2C communication error");
+    return false;
+  }
 
   bool ok=false;
   for (int tries=1; tries<=5; ++tries) {
@@ -36,7 +45,10 @@ bool IMU55::begin() {
     if (ok) break;
     delay(500);
   }
-  if (!ok) return false;
+  if (!ok) {
+    status_ = IMU_INIT_FAILED;
+    return false;
+  }
 
   bool restored = loadCalibrationFromNVS();
   Serial.println(restored ? "Calibration restored from NVS. Move slightly to settle."
@@ -44,6 +56,8 @@ bool IMU55::begin() {
 
   sensor_t s; bno_.getSensor(&s);
   Serial.printf("Sensor ID: %ld\n", (long)s.sensor_id);
+  status_ = IMU_NOT_CALIBRATED;
+  last_valid_data_ms_ = millis();
   return true;
 }
 
@@ -88,6 +102,32 @@ void IMU55::clearCalNVS() {
   Serial.println("Calibration offsets cleared from NVS.");
 }
 
+void IMU55::updateStatus() {
+  bno_.getCalibration(&last_sys_, &last_gyro_, &last_accel_, &last_mag_);
+  if (last_sys_ == 0 && last_gyro_ == 0 && last_accel_ == 0 && last_mag_ == 0) {
+    if (millis() - last_valid_data_ms_ > data_timeout_ms_) {
+      status_ = IMU_COMM_ERROR;
+      data_valid_ = false;
+      return;
+    }
+  }
+  uint8_t min_required = min_calib_level_;
+  if (last_sys_ < min_required || last_gyro_ < min_required || 
+      last_accel_ < min_required || last_mag_ < min_required) {
+    status_ = IMU_NOT_CALIBRATED;
+    data_valid_ = false;
+    return;
+  }
+  if (!isfinite(e_.orientation.x) || !isfinite(e_.orientation.y) || !isfinite(e_.orientation.z)) {
+    status_ = IMU_DATA_INVALID;
+    data_valid_ = false;
+    return;
+  }
+  status_ = IMU_OK;
+  data_valid_ = true;
+  last_valid_data_ms_ = millis();
+}
+
 void IMU55::update() {
   bno_.getEvent(&e_, Adafruit_BNO055::VECTOR_EULER);
 
@@ -113,12 +153,15 @@ void IMU55::update() {
     saveCalibrationToNVS();
     stored_ = true;
   }
+  // updateStatus();
 }
 
 void IMU55::getRPY(float& roll, float& pitch, float& yaw) {
-  yaw   = e_.orientation.x;  // heading
-  roll  = e_.orientation.y;
-  pitch = e_.orientation.z;
+  yaw = e_.orientation.x * M_PI / 180.0f;
+  while (yaw > M_PI) yaw -= 2.0f * M_PI;
+  while (yaw < -M_PI) yaw += 2.0f * M_PI;
+  roll = e_.orientation.y * M_PI / 180.0f;
+  pitch = e_.orientation.z * M_PI / 180.0f;
 }
 
 bool IMU55::isCalibrated() {
@@ -126,4 +169,37 @@ bool IMU55::isCalibrated() {
   bno_.getCalibration(&sys,&g,&a,&m);
   Serial.printf("Calibration (SYS,G,A,M)=(%u,%u,%u,%u)\n", sys,g,a,m);
   return (sys==3 && g==3 && a==3 && m==3);
+}
+
+void IMU55::getCalibrationLevels(uint8_t& sys, uint8_t& gyro, uint8_t& accel, uint8_t& mag) {
+  sys = last_sys_;
+  gyro = last_gyro_;
+  accel = last_accel_;
+  mag = last_mag_;
+}
+
+void IMU55::printStatus() const {
+  const char* status_strings[] = {"OK", "NOT_CALIBRATED", "COMM_ERROR", "INIT_FAILED", "DATA_INVALID"};
+  Serial.printf("IMU Status: %s\n", status_strings[status_]);
+  Serial.printf("Calibration (SYS,G,A,M): (%u,%u,%u,%u)\n", last_sys_, last_gyro_, last_accel_, last_mag_);
+  Serial.printf("Data Valid: %s, Age: %.2fs\n", data_valid_ ? "YES" : "NO", getDataAge());
+  Serial.printf("Comm Errors: %lu, Last: %lums ago\n", comm_error_count_, 
+               last_comm_error_ms_ > 0 ? millis() - last_comm_error_ms_ : 0);
+}
+
+void IMU55::forceRecalibration() {
+  Serial.println("IMU: Forcing recalibration...");
+  stored_ = false;
+  clearCalNVS();
+  bno_.setMode(OPERATION_MODE_CONFIG);
+  delay(25);
+  bno_.setExtCrystalUse(true);
+  delay(10);
+  bno_.setMode(OPERATION_MODE_NDOF);
+  delay(25);
+  for (int i = 0; i < 3; ++i) {
+    bno_.getEvent(&e_, Adafruit_BNO055::VECTOR_EULER);
+    delay(10);
+  }
+  status_ = IMU_NOT_CALIBRATED;
 }

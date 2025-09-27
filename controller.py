@@ -49,6 +49,7 @@ ax.set_title("Real-Time Robot Trajectory")
 ax.grid(True)
 ax.legend()
 plt.show()
+print("Plot ready. Entering loop…")
 
 try:
     while True:
@@ -60,11 +61,11 @@ try:
         left_y = -joystick.get_axis(1)  # Left stick vertical
 
         # Get right stick X and Y
-        right_x = joystick.get_axis(2)
-        right_y = -joystick.get_axis(3)
+        right_x = joystick.get_axis(3)
+        right_y = -joystick.get_axis(4)
 
         # Get trigger values
-        left_trigger = joystick.get_axis(4)
+        left_trigger = joystick.get_axis(2)
         right_trigger = joystick.get_axis(5)
 
         # Get button states (example: A, B, X, Y)
@@ -116,8 +117,9 @@ try:
             traj_plot.set_data(trajectory_x, trajectory_y)
             ax.relim()
             ax.autoscale_view()
-            plt.draw()
-            plt.pause(0.001)  # Refresh Rate
+            # plt.draw()
+        
+        plt.pause(0.001)  # Refresh Rate
             
         csv_writer.writerow([
         timestamp,

@@ -19,6 +19,7 @@
 #include "pid_webpage.h"
 #include "imu_55.h"
 #include "imu_85.h"
+#include "ekf_localization.h"
 
 WebServer server(80);
 
@@ -27,8 +28,10 @@ const char* ssid = "HAMR";
 const char* password = "123571113";
 
 //------------IMU OBJECT--------------
-IMU55 sens;                 // SDA=4, SCL=5, addr=0x28 by default
+IMU55 sens(33,34);                 // SDA=4, SCL=5, addr=0x28 by default
 float roll_b,pitch_b,yaw_b;
+//------------EKF CONFIG--------------
+EkfYawConfig cfg;
 
 //---------------------------GLOBALS----------------------
 // UDP SETUP
@@ -95,7 +98,7 @@ float pwmL_out = 0.0;
 float pwmR_out = 0.0;
 
 // Control interval (ms)
-const unsigned long PID_INTERVAL = 50;
+const unsigned long PID_INTERVAL = 10;
 static unsigned long lastUdpTime = 0;
 
 // PID state variables
@@ -141,11 +144,13 @@ static const uint16_t VER   = 1;
 static const uint16_t TYPE_CMD  = 0x0001; // PC->ESP : left,right
 static const uint16_t TYPE_CMD3 = 0x0011; // PC->ESP : left,right,turret
 static const uint16_t TYPE_ENC  = 0x0003; // ESP->PC : encoders
+static const uint16_t TYPE_POSE = 0x0004; // ESP->PC : pose (x,y,theta) + uncertainty
 // Latest commands received over UART (ROS)
 volatile float uart_left_cmd = 0.0f;
 volatile float uart_right_cmd = 0.0f;
 volatile float uart_turret_cmd = 0.0f;
 volatile uint32_t last_uart_cmd_ms = 0;
+static uint32_t pose_seq = 0;
 
 // Enc packet sequence
 static uint32_t enc_seq = 0;
@@ -172,12 +177,21 @@ struct EncPacket {
   int32_t ticksL, ticksR, ticksT;
   uint16_t crc16;
 };
-
+struct PosePacket {
+  uint16_t magic, ver, type;
+  uint32_t seq;
+  uint64_t t_tx_ns;
+  float x, y, theta;           // Robot pose in meters and radians
+  float sigma_x, sigma_y, sigma_theta; // Uncertainties
+  uint8_t ekf_status;          // 0=odometry_only, 1=ekf_fused, 2=imu_invalid
+  uint16_t crc16;
+};
 #pragma pack(pop)
 
 static const size_t CMD_SIZE  = sizeof(CmdPacket);   // 2-float
 static const size_t CMD3_SIZE = sizeof(Cmd3Packet);  // 3-float
 static const size_t ENC_SIZE  = sizeof(EncPacket);
+static const size_t POSE_SIZE = sizeof(PosePacket);
 
 // CRC32->16 surrogate (must match Pi side)
 uint16_t crc16_surrogate(const uint8_t* data, size_t n) {
@@ -190,6 +204,38 @@ uint16_t crc16_surrogate(const uint8_t* data, size_t n) {
   }
   c ^= 0xFFFFFFFFu;
   return (uint16_t)(c & 0xFFFF);
+}
+
+void transmitPoseData() {
+    PosePacket pose;
+    pose.magic = MAGIC; 
+    pose.ver = VER; 
+    pose.type = TYPE_POSE;
+    pose.seq = ++pose_seq;
+    pose.t_tx_ns = (uint64_t)micros() * 1000ull;
+    
+    // Get current pose (after EKF fusion)
+    pose.x = getRobotX();
+    pose.y = getRobotY();
+    pose.theta = getRobotTheta();
+    
+    // Get uncertainties (standard deviations)
+    pose.sigma_x = getUncertaintyX();
+    pose.sigma_y = getUncertaintyY();
+    pose.sigma_theta = getUncertaintyTheta();
+    
+    // Set EKF status flag
+    if (sens.getStatus() == IMU_OK && sens.isDataValid()) {
+        pose.ekf_status = 1; // EKF fused
+    } else if (sens.getStatus() != IMU_INIT_FAILED) {
+        pose.ekf_status = 2; // IMU available but invalid/uncalibrated
+    } else {
+        pose.ekf_status = 0; // Odometry only
+    }
+    
+    pose.crc16 = crc16_surrogate((uint8_t*)&pose, POSE_SIZE - 2);
+    
+    Serial0.write((uint8_t*)&pose, POSE_SIZE);
 }
 
 // ------------- Units & conversion -------------
@@ -294,12 +340,22 @@ void setup() {
   Serial0.begin(460800);
   Serial.println("ESP32 bidirectional UART Ready");
   Serial.println("Pulling Micro-ROS");
-  initOdometry(); // Initialize odometry
+
+  // ----------------Initialize odometry--------------
+  initOdometry(); 
+  cfg.R_yaw_rad2 = sq(12.0f * M_PI / 180.0f);
+  cfg.gate_sigma = 3.0f;  // set <=0 to disable gating
+  cfg.alignment_timeout_ms = 5000.0f;
+  cfg.min_calibration_level = 2;
+  cfg.enable_periodic_realignment = true;
+  cfg.realignment_threshold = 30.0f * M_PI / 180.0f; // 30 degrees
+  cfg.realignment_count_threshold = 10;
+
+  // ----------------WIFI SETUP----------------------------------------
   WiFi.softAP(ssid, password, 4, 0, 2);
   IPAddress myIP = WiFi.softAPIP();
   Serial.print("ESP IP: ");
   Serial.println(myIP);
-  
 
   //--------------------------------ESP SERVER---------------------------
   server.on("/", HTTP_GET, []() {
@@ -338,7 +394,7 @@ void setup() {
     json += "\"Test\":" + String(test, 4); // 4 decimals for float
     json += "}";
     server.send(200, "application/json", json);
-});
+  });
 
   // POST updates
   server.on("/updatePID", HTTP_POST, []() {
@@ -349,7 +405,7 @@ void setup() {
     String response = "Updated PID values:\nKp=" + String(Kp_L) + "\nKi=" + String(Ki_L) + "\nKd=" + String(Kd_L) +
                       "\nTest=" + String(test, 4);
     server.send(200, "text/plain", response);
-});
+  });
 
   server.onNotFound([]() {
     server.send(404, "text/plain", "404 Not Found");
@@ -407,6 +463,8 @@ void setup() {
     Serial.println("IMU init failed. Check wiring/address.");
     while (1) delay(1000);
   }
+  // sens.setMinCalibrationLevel(2); 
+  // sens.setDataTimeout(1000);
 }
 
 void loop() {
@@ -414,8 +472,8 @@ void loop() {
   //=======IMU_BASE READ=======
     sens.update();
     sens.getRPY(roll_b,pitch_b,yaw_b);
-    Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
-    Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
+    // Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
+    // Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
 
   //-------------------------MICRO_ROS_PROTCOL-------------------------------
   // ---- RX: parse commands (robust to CMD or CMD3) ----
@@ -551,7 +609,7 @@ void loop() {
     lastTicksR = currentTicksR;
     lastPidTime = now;
 
-    // Calculate ticks and send to Micro ROS Bridge to Publish 
+    // Calculate ticks and pose send to Micro ROS Bridge to Publish 
     static uint32_t last_tx_ms = 0;
     if (millis() - last_tx_ms >= 10) {
       last_tx_ms = millis();
@@ -564,6 +622,11 @@ void loop() {
       enc.crc16 = crc16_surrogate((uint8_t*)&enc, ENC_SIZE - 2);
 
       Serial0.write((uint8_t*)&enc, ENC_SIZE); // binary out on the data UART
+    }
+    static uint32_t last_pose_tx_ms = 0;
+    if (millis() - last_pose_tx_ms >= 10) {
+        last_pose_tx_ms = millis();
+        transmitPoseData();
     }
 
     // Joystick-based differential drive control:
@@ -731,39 +794,68 @@ void loop() {
     // sendUDP(status);
 
   }
-
   
-  delay(100);
+  // delay(100);
 
   /////// ================= LOCALIZATION START =====================////
 
   if(now- lastOdometryTime >= ODOMETRY_INTERVAL) {
     // Update odometry every ODOMETRY_INTERVAL ms
-    updateOdometry();
+    updateOdometry(); // KF-Prediction step
+    ekfYawUpdate(yaw_b, cfg);//KF - Update step updates robot_x, robot_y, robot_theta, covariance
     // updateSampledPoseFromLastDelta();
+    // transmitPoseData();
 
     // static unsigned long lastDetailedPrint = 0;
     // if (now - lastDetailedPrint >= 1000) { // Print every 1-second
     //   Serial.println("\n PROBABILISTIC ODOM ESTIMATION:");
-    //   printPose();
-    //   // printMotionModel();
+      printPose();
+    //   printMotionModel();
 
     //   static unsigned long lastCovPrint = 0;
     //   if (now - lastCovPrint >= 5000) { // Print covariance every 5 seconds
-    //     // printCovariance();
+    //     printCovariance();
     //     lastCovPrint = now;
     //   }
 
     //   float sample_x, sample_y, sample_theta;
     //   samplePose(sample_x, sample_y, sample_theta); 
-    //   // Serial.printf("Sampled Pose: X=%.2f, Y=%.2f, Theta=%.2f\n", sample_x, sample_y, sample_theta * 180.0 / PI);
-    //   // Serial.println("--------------------------------------------------");
+    //   Serial.printf("Sampled Pose: X=%.2f, Y=%.2f, Theta=%.2f\n", sample_x, sample_y, sample_theta * 180.0 / PI);
+    //   Serial.println("--------------------------------------------------");
     //   lastDetailedPrint = now;
+    // }
+
+    // if (sens.getStatus() == IMU_OK && sens.isDataValid()) {
+    //     bool ekf_success = ekfYawUpdate(yaw_b, cfg);
+    //     static int ekf_accept_count = 0;
+    //     static int ekf_total_count = 0;
+    //     static unsigned long last_ekf_stats = 0;
+    //     ekf_total_count++;
+    //     if (ekf_success) ekf_accept_count++;
+    //     if (millis() - last_ekf_stats > 10000) { // Every 10 seconds
+    //         Serial.printf("EKF Stats: %d/%d (%.1f%%) measurements accepted\n",
+    //                      ekf_accept_count, ekf_total_count, 
+    //                      100.0f * ekf_accept_count / ekf_total_count);
+    //         bool aligned;
+    //         float offset;
+    //         unsigned long last_align;
+    //         getEkfAlignmentInfo(aligned, offset, last_align);
+    //         Serial.printf("EKF Alignment: %s, offset=%.1f°, age=%lums\n",
+    //                      aligned ? "YES" : "NO", offset, millis() - last_align);
+            
+    //         last_ekf_stats = millis();
+    //     }
+    // } else {
+    //     Serial.println("EKF: Using odometry only (IMU not ready)");
+    // }
+    // static unsigned long last_pose_tx = 0;
+    // if (millis() - last_pose_tx >= 50) {
+    //     transmitPoseData();
+    //     last_pose_tx = millis();
     // }
     lastOdometryTime = now;
   }
 }
-
 
 
 
