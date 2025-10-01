@@ -100,6 +100,7 @@ float pwmR_out = 0.0;
 // Control interval (ms)
 const unsigned long PID_INTERVAL = 10;
 static unsigned long lastUdpTime = 0;
+static unsigned long lastSerialCtlTime = 0;
 
 // PID state variables
 float integralL = 0.0f, integralR = 0.0f;
@@ -453,16 +454,15 @@ void setup() {
   lastTurretTime = millis();
 
   Serial.println("Low Level Control Ready");
-  //Serial.println("Commands: f=forward, b=backward, r=right, l=left, s=stop, +=faster, -=slower");
   Serial.println("Send joystick data like: LX:0.00 LY:0.00 RX:0.00 RY:0.00 LT:0.00 RT:0.00 A:0 B:0 X:0 Y:0");
   Serial.printf("Initial Speed PWM: %.0f\n", basePWM);
 
   ///=========== IMU_BASE SETUP =========////
-  while (!Serial) {}
-  if (!sens.begin()) {
-    Serial.println("IMU init failed. Check wiring/address.");
-    while (1) delay(1000);
-  }
+  // while (!Serial) {}
+  // if (!sens.begin()) {
+  //   Serial.println("IMU init failed. Check wiring/address.");
+  //   while (1) delay(1000);
+  // }
   // sens.setMinCalibrationLevel(2); 
   // sens.setDataTimeout(1000);
 }
@@ -470,121 +470,141 @@ void setup() {
 void loop() {
 
   //=======IMU_BASE READ=======
-    sens.update();
-    sens.getRPY(roll_b,pitch_b,yaw_b);
+    // sens.update();
+    // sens.getRPY(roll_b,pitch_b,yaw_b);
     // Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
     // Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
 
   //-------------------------MICRO_ROS_PROTCOL-------------------------------
   // ---- RX: parse commands (robust to CMD or CMD3) ----
-    static uint8_t buf[64];      // big enough for CMD3 (48 bytes) + slack
-    static size_t  have = 0;
+  static uint8_t buf[64];      // big enough for CMD3 (48 bytes) + slack
+  static size_t  have = 0;
 
     // accumulate
-    while (Serial0.available() && have < sizeof(buf)) {
+  while (Serial0.available() && have < sizeof(buf)) {
       buf[have++] = (uint8_t)Serial0.read();
     }
     // try to parse while we have at least a header
-    while (have >= 6) { // magic(2)+ver(2)+type(2)
-    uint16_t magic = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
-    if (magic != MAGIC) {
-      // resync: drop 1 byte
-      memmove(buf, buf+1, --have);
-      continue;
-    }
-    uint16_t ver  = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
-    uint16_t type = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
+  while (have >= 6) { // magic(2)+ver(2)+type(2)
+      uint16_t magic = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+      if (magic != MAGIC) {
+        // resync: drop 1 byte
+        memmove(buf, buf+1, --have);
+        continue;
+      }
+      uint16_t ver  = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+      uint16_t type = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
 
-    if (ver != VER) {
+      if (ver != VER) {
+        memmove(buf, buf+1, --have);
+        continue;
+      }
+      size_t need = (type == TYPE_CMD) ? CMD_SIZE :
+                  (type == TYPE_CMD3)? CMD3_SIZE : 0;
+      if(need==0){
+        // unknown type; drop 1 byte
+        memmove(buf, buf+1, --have);
+        continue;
+      }
+      if (have < need) break; // incomplete frame
+      if (type == TYPE_CMD && need == CMD_SIZE) {
+        CmdPacket cmd; memcpy(&cmd, buf, CMD_SIZE);
+        uint16_t calc = crc16_surrogate((uint8_t*)&cmd, CMD_SIZE - 2);
+      if (calc == cmd.crc16) {
+        noInterrupts();
+        uart_left_cmd  = cmd.left;
+        uart_right_cmd = cmd.right;
+        last_uart_cmd_ms = millis();
+        interrupts();
+        // (optional) Serial.printf("UART CMD: L=%.3f R=%.3f\n", cmd.left, cmd.right);
+      }
+      memmove(buf, buf + CMD_SIZE, have - CMD_SIZE); have -= CMD_SIZE;
+    } else if (type == TYPE_CMD3 && need == CMD3_SIZE) {
+      Cmd3Packet cmd3; memcpy(&cmd3, buf, CMD3_SIZE);
+      uint16_t calc = crc16_surrogate((uint8_t*)&cmd3, CMD3_SIZE - 2);
+      if (calc == cmd3.crc16) {
+        noInterrupts();
+        uart_left_cmd   = cmd3.left * -1;
+        uart_right_cmd  = cmd3.right * -1;
+        uart_turret_cmd = cmd3.turret;
+        last_uart_cmd_ms = millis();
+        interrupts();
+        // (optional) Serial.printf("UART CMD3: L=%.3f R=%.3f T=%.3f\n", cmd3.left, cmd3.right, cmd3.turret);
+      }
+      memmove(buf, buf + CMD3_SIZE, have - CMD3_SIZE); have -= CMD3_SIZE;
+    } else {
+      // shouldn’t happen
       memmove(buf, buf+1, --have);
-      continue;
     }
-    size_t need = (type == TYPE_CMD) ? CMD_SIZE :
-                (type == TYPE_CMD3)? CMD3_SIZE : 0;
-    if(need==0){
-      // unknown type; drop 1 byte
-      memmove(buf, buf+1, --have);
-      continue;
-    }
-    if (have < need) break; // incomplete frame
-    if (type == TYPE_CMD && need == CMD_SIZE) {
-      CmdPacket cmd; memcpy(&cmd, buf, CMD_SIZE);
-      uint16_t calc = crc16_surrogate((uint8_t*)&cmd, CMD_SIZE - 2);
-    if (calc == cmd.crc16) {
-      noInterrupts();
-      uart_left_cmd  = cmd.left;
-      uart_right_cmd = cmd.right;
-      last_uart_cmd_ms = millis();
-      interrupts();
-      // (optional) Serial.printf("UART CMD: L=%.3f R=%.3f\n", cmd.left, cmd.right);
-    }
-    memmove(buf, buf + CMD_SIZE, have - CMD_SIZE); have -= CMD_SIZE;
-  } else if (type == TYPE_CMD3 && need == CMD3_SIZE) {
-    Cmd3Packet cmd3; memcpy(&cmd3, buf, CMD3_SIZE);
-    uint16_t calc = crc16_surrogate((uint8_t*)&cmd3, CMD3_SIZE - 2);
-    if (calc == cmd3.crc16) {
-      noInterrupts();
-      uart_left_cmd   = cmd3.left;
-      uart_right_cmd  = cmd3.right;
-      uart_turret_cmd = cmd3.turret;
-      last_uart_cmd_ms = millis();
-      interrupts();
-      // (optional) Serial.printf("UART CMD3: L=%.3f R=%.3f T=%.3f\n", cmd3.left, cmd3.right, cmd3.turret);
-    }
-    memmove(buf, buf + CMD3_SIZE, have - CMD3_SIZE); have -= CMD3_SIZE;
-  } else {
-    // shouldn’t happen
-    memmove(buf, buf+1, --have);
+  }
+    
+  //-----------------------TELEOP PROTOCOL------------------------------
+  // Handle serial commands, Read joystick data from serial
+
+  // Serial.setTimeout(5);
+  if (Serial.available()) {          
+    String msg = Serial.readStringUntil('\n');
+    msg.trim();
+
+    int lyIndex = msg.indexOf("LY:");
+    int rxIndex = msg.indexOf("RX:");
+    int ltIndex = msg.indexOf("LT:");
+    int rtIndex = msg.indexOf("RT:");
+    if (lyIndex < 0 || rxIndex < 0 || ltIndex < 0 || rtIndex < 0);
+
+    auto seg = [&](int idx)->String {
+      int end = msg.indexOf(' ', idx);
+      if (end < 0) end = msg.length();
+      return msg.substring(idx + 3, end);
+    };
+
+    ly = seg(lyIndex).toFloat();
+    rx = seg(rxIndex).toFloat();
+    lt = seg(ltIndex).toFloat();
+    rt = seg(rtIndex).toFloat();
+    lastSerialCtlTime = millis();
   }
 
-  }
+  server.handleClient(); // Handle HTTP requests
+  int len = udp.parsePacket();
+  if (len > 0) {
+    udp.read(incoming, sizeof(incoming));
+    incoming[len] = '\0';  // null-terminate
+    // Serial.printf("Received: %s\n", incoming);
+    String msg = String(incoming); 
 
-  // Handle serial commands
-  //   Read joystick data from serial
-  //   if (Serial.available()) {
-  //   String msg = Serial.readStringUntil('\n');}
+    remoteIP = udp.remoteIP();
+    remotePort = udp.remotePort();
 
-    //-----------------------TELEOP PROTOCOL------------------------------
-    server.handleClient(); // Handle HTTP requests
-    int len = udp.parsePacket();
-    if (len > 0) {
-      udp.read(incoming, sizeof(incoming));
-      incoming[len] = '\0';  // null-terminate
-      // Serial.printf("Received: %s\n", incoming);
-      String msg = String(incoming); 
+    int lyIndex = msg.indexOf("LY:");
+    int rxIndex = msg.indexOf("RX:");
+    int ltIndex = msg.indexOf("LT:");
+    int rtIndex = msg.indexOf("RT:");
 
-      remoteIP = udp.remoteIP();
-      remotePort = udp.remotePort();
+  if (lyIndex != -1 && rxIndex != -1 && ltIndex != -1 && rtIndex != -1) {
+    // Extract LY and RX values as floats
+    // Find next space or end of line after LY:
+    int lyEnd = msg.indexOf(' ', lyIndex);
+    if (lyEnd == -1) lyEnd = msg.length();
+    int rxEnd = msg.indexOf(' ', rxIndex);
+    if (rxEnd == -1) rxEnd = msg.length();
+    int ltEnd = msg.indexOf(' ', ltIndex);
+    if (ltEnd == -1) ltEnd = msg.length();
+    int rtEnd = msg.indexOf(' ', rtIndex);
+    if (rtEnd == -1) rtEnd = msg.length();
 
-      int lyIndex = msg.indexOf("LY:");
-      int rxIndex = msg.indexOf("RX:");
-      int ltIndex = msg.indexOf("LT:");
-      int rtIndex = msg.indexOf("RT:");
+    String lyStr = msg.substring(lyIndex + 3, lyEnd);
+    String rxStr = msg.substring(rxIndex + 3, rxEnd);
+    String ltStr = msg.substring(ltIndex + 3, ltEnd);
+    String rtStr = msg.substring(rtIndex + 3, rtEnd);
 
-    if (lyIndex != -1 && rxIndex != -1 && ltIndex != -1 && rtIndex != -1) {
-      // Extract LY and RX values as floats
-      // Find next space or end of line after LY:
-      int lyEnd = msg.indexOf(' ', lyIndex);
-      if (lyEnd == -1) lyEnd = msg.length();
-      int rxEnd = msg.indexOf(' ', rxIndex);
-      if (rxEnd == -1) rxEnd = msg.length();
-      int ltEnd = msg.indexOf(' ', ltIndex);
-      if (ltEnd == -1) ltEnd = msg.length();
-      int rtEnd = msg.indexOf(' ', rtIndex);
-      if (rtEnd == -1) rtEnd = msg.length();
-
-      String lyStr = msg.substring(lyIndex + 3, lyEnd);
-      String rxStr = msg.substring(rxIndex + 3, rxEnd);
-      String ltStr = msg.substring(ltIndex + 3, ltEnd);
-      String rtStr = msg.substring(rtIndex + 3, rtEnd);
-
-      ly = lyStr.toFloat();
-      rx = rxStr.toFloat();
-      lt = ltStr.toFloat();
-      rt = rtStr.toFloat();
-      lastUdpTime = millis();
-        }
+    ly = lyStr.toFloat();
+    rx = rxStr.toFloat();
+    lt = ltStr.toFloat();
+    rt = rtStr.toFloat();
+    lastUdpTime = millis();
     }
+  }
 
   ////=======================PID loop timing==================////
   unsigned long now = millis();
@@ -629,18 +649,9 @@ void loop() {
         transmitPoseData();
     }
 
-    // Joystick-based differential drive control:
-    // Negative ly because joystick up may be negative, adjust if needed
-    // Normalize joystick values to -1 to 1 range
-    // float forward = ly;  
-    // float turn = rx;
-
-    // // HTTML Joystick control
-    // float forward = joyY;  // Forward/backward control from joystick
-    // float turn = joyX;     // Left/right control from joystick
-
     bool useUdp = (millis() - lastUdpTime < 100);
-    bool useUart = (millis() - last_uart_cmd_ms < 150);
+    bool useUart = (millis() - last_uart_cmd_ms < 100);
+    bool useSerialCtl = (millis() - lastSerialCtlTime  < 1000);
 
     float rpmTargetL = 0.0f, rpmTargetR = 0.0f;
     float pwmFF_L = 0.0f, pwmFF_R = 0.0f;
@@ -655,21 +666,23 @@ void loop() {
       // Keep your existing FF style: scale basePWM by the normalized target
       pwmFF_L = basePWM * (rpmTargetL / MAX_RPM_CMD);
       pwmFF_R = basePWM * (rpmTargetR / MAX_RPM_CMD);
-
     }
-    else{
-    float forward = useUdp ? ly : joyY;
-    float turn = useUdp ? rx : joyX;
-
-    forward *= 0.8f;
-    turn    *= 0.8f;
-
-    // Combine for left and right motor base PWM
-    rpmTargetL = (forward + turn) * MAX_RPM_CMD;
-    rpmTargetR = (forward - turn) * MAX_RPM_CMD;
-
-    pwmFF_L = (forward + turn) * basePWM;
-    pwmFF_R = (forward - turn) * basePWM;
+    else if (useSerialCtl) {
+      float forward = ly * 0.8f;
+      float turn    = rx * 0.8f;
+      rpmTargetL = (forward + turn) * MAX_RPM_CMD;
+      rpmTargetR = (forward - turn) * MAX_RPM_CMD;
+      pwmFF_L = (forward + turn) * basePWM;
+      pwmFF_R = (forward - turn) * basePWM;
+    } else {
+      // UDP / HTML fallback
+      float forward = useUdp ? ly : joyY;
+      float turn    = useUdp ? rx : joyX;
+      forward *= 0.8f; turn *= 0.8f;
+      rpmTargetL = (forward + turn) * MAX_RPM_CMD;
+      rpmTargetR = (forward - turn) * MAX_RPM_CMD;
+      pwmFF_L = (forward + turn) * basePWM;
+      pwmFF_R = (forward - turn) * basePWM;
     }
 
     // Calculate error in motord
@@ -710,26 +723,41 @@ void loop() {
     setMotor(pwmT, dirT, pwmT_out, 2);
     
     if (useUart) {
-      // UART cmd is platform angular velocity [rad/s]
-      const float target_rpm_T_platform = wheel_rpm_from_cmd(uart_turret_cmd);
+      // ===== Open-loop turret drive: cmd [rad/s] -> PWM =====
+      // 1) clamp incoming command to a safe range
+      const float MAX_CMD_RAD_S = 2.0f;                // tune: your max platform speed
+      float cmd = constrain(uart_turret_cmd, -MAX_CMD_RAD_S, MAX_CMD_RAD_S);
 
-      // Simple PI on platform velocity
-      static float integTv = 0.0f;
-      const float KpTv = 120.0f;   // tune
-      const float KiTv = 20.0f;    // tune
+      // 2) deadband for tiny commands
+      const float CMD_DEADBAND = 0.05f;                // rad/s (ignore tiny commands)
+      if (fabsf(cmd) < CMD_DEADBAND) cmd = 0.0f;
 
-      float errTv = target_rpm_T_platform - rpmT_platform;
-      integTv += errTv * dt;
-      integTv = constrain(integTv, -100.0f, 100.0f);
+      // 3) map |cmd| -> PWM with static friction compensation
+      //    - PWM_STATIC: minimal PWM to break static friction
+      //    - remaining range scales linearly with |cmd|
+      const float PWM_STATIC = 350.0f;                 // tune: 250–600 typical
+      float pwm_mag = 0.0f;
+      if (cmd != 0.0f) {
+        float frac = fabsf(cmd) / MAX_CMD_RAD_S;       // 0..1
+        pwm_mag = PWM_STATIC + frac * (maxPWM - PWM_STATIC);
+      }
 
-      float pwm_cmd = KpTv * errTv + KiTv * integTv;
-      pwmT_out = constrain(pwm_cmd, -maxPWM, maxPWM);
-      if (fabsf(pwmT_out) < 400.0f) pwmT_out = 0.0f;
+      float pwm_target = copysignf(pwm_mag, cmd);
 
-      // Angle reporting for status (platform degrees):
-      currentAngleT = (ticksT * DEGREES_PER_TURRET_TICK) / turretGearRatio;
-      currentAngleT = fmodf(currentAngleT, 360.0f);
+      // 4) slew limit to avoid jerks
+      static float pwm_prev = 0.0f;
+      const float PWM_SLEW_PER_S = 8000.0f;            // tune: PWM units per second
+      float max_step = PWM_SLEW_PER_S * dt;
+      float step = constrain(pwm_target - pwm_prev, -max_step, max_step);
+      pwm_prev += step;
+
+      // 5) apply limits and output
+      pwmT_out = constrain(pwm_prev, -maxPWM, maxPWM);
+
+      // Optional: status (platform angle, since ticks are output-side)
+      currentAngleT = fmodf(ticksT * DEGREES_PER_TURRET_TICK, 360.0f);
     }
+
     if (lt > 0.1f || rt > 0.1f){
     // Simple turret control based on triggers
       targetTurretAngle = 0.0;
@@ -762,7 +790,7 @@ void loop() {
       pwmT_out = Kp_turret * errorT + Ki_turret * integralT + Kd_turret * dErrorT;
       pwmT_out = constrain(pwmT_out, -maxPWM, maxPWM);
       if (abs(pwmT_out) < 400) pwmT_out = 0;
-      lastErrorT = errorT;
+      lastErrorT = errorT;    
       lastTurretTime = now;
       }
     }

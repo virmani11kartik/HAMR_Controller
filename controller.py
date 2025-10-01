@@ -8,28 +8,42 @@ import datetime
 import re
 import matplotlib.pyplot as plt
 
-# # Change COM to your ESP32 port
-# ser = serial.Serial('COM4', 115200, timeout=0.1)
-# time.sleep(2)  # wait for ESP to reset
+# ========= Transport toggles =========
+USE_SERIAL = True   # True -> talk to ESP32 over USB serial
+USE_UDP    = False  # True -> keep UDP send/recv as well (fallback)
 
-# === Update with the ESP32's IP printed on Serial Monitor ===
-ESP32_IP = "192.168.4.1"  # Replace with your ESP32 IP
+# ========= Serial config =========
+SER_PORT = "/dev/ttyACM0"  # adjust as needed
+SER_BAUD = 115200
+SER_TIMEOUT = 0.0           # non-blocking
+
+# ========= UDP config (if used) =========
+ESP32_IP   = "192.168.4.1"
 ESP32_PORT = 12345
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.setblocking(False)  # Non-blocking mode
+# ---------- Setup transports ----------
+ser = None
+if USE_SERIAL:
+    ser = serial.Serial(SER_PORT, SER_BAUD, timeout=SER_TIMEOUT)
+    # give the ESP a moment after opening the port (optional)
+    time.sleep(0.5)
 
+sock = None
+if USE_UDP:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
+
+# ---------- Controller ----------
 pygame.init()
 pygame.joystick.init()
-
 if pygame.joystick.get_count() == 0:
     print("No controller detected.")
-    exit()
-
+    raise SystemExit
 joystick = pygame.joystick.Joystick(0)
 joystick.init()
 print(f"Connected to controller: {joystick.get_name()}")
 
+# ---------- CSV + Plot ----------
 csv_file = open("controller_and_pose_log.csv", mode="w", newline="")
 csv_writer = csv.writer(csv_file)
 csv_writer.writerow([
@@ -40,35 +54,39 @@ csv_writer.writerow([
 
 plt.ion()
 fig, ax = plt.subplots()
-trajectory_x = []
-trajectory_y = []
+trajectory_x, trajectory_y = [], []
 traj_plot, = ax.plot([], [], 'b.-', label='Trajectory')
-ax.set_xlabel("X [m]")
-ax.set_ylabel("Y [m]")
+ax.set_xlabel("X [m]"); ax.set_ylabel("Y [m]")
 ax.set_title("Real-Time Robot Trajectory")
-ax.grid(True)
-ax.legend()
+ax.grid(True); ax.legend()
 plt.show()
 print("Plot ready. Entering loop…")
 
+# Pose line regex (same as your UDP parser)
+POSE_RE = re.compile(
+    r"X:\s*([-\d\.]+)\s*±\s*([-\d\.]+)\s*m,\s*Y:\s*([-\d\.]+)\s*±\s*([-\d\.]+)\s*m,\s*Theta:\s*([-\d\.]+)\s*±\s*([-\d\.]+)"
+)
+
+def try_parse_pose_line(line):
+    m = POSE_RE.search(line)
+    if not m:
+        return None
+    return tuple(map(float, m.groups()))  # (x, x_std, y, y_std, theta, theta_std)
+
 try:
+    last_plot = time.time()
     while True:
-        updated = False 
-        pygame.event.pump()  # Updates internal state
+        updated = False
+        pygame.event.pump()
 
-        # Get left stick X and Y
-        left_x = joystick.get_axis(0)  # Left stick horizontal
-        left_y = -joystick.get_axis(1)  # Left stick vertical
-
-        # Get right stick X and Y
+        # Sticks & triggers (keep your original mapping)
+        left_x  = joystick.get_axis(0)
+        left_y  = -joystick.get_axis(1)
         right_x = joystick.get_axis(3)
         right_y = -joystick.get_axis(4)
-
-        # Get trigger values
-        left_trigger = joystick.get_axis(2)
+        left_trigger  = joystick.get_axis(2)
         right_trigger = joystick.get_axis(5)
 
-        # Get button states (example: A, B, X, Y)
         a = joystick.get_button(0)
         b = joystick.get_button(1)
         x = joystick.get_button(2)
@@ -78,64 +96,72 @@ try:
             f"LX:{left_x:.2f} LY:{left_y:.2f} "
             f"RX:{right_x:.2f} RY:{right_y:.2f} "
             f"LT:{left_trigger:.2f} RT:{right_trigger:.2f} "
-            f"A:{a} B:{b} X:{x} Y:{y}"
+            f"A:{a} B:{b} X:{x} Y:{y}\n"
         )
 
-        # Send controller data to ESP32
-        # ser.write((msg + '\n').encode())
-        sock.sendto(msg.encode(), (ESP32_IP, ESP32_PORT))
+        # -------- Send to ESP --------
+        if USE_SERIAL and ser is not None:
+            # Non-blocking write is fine for short lines
+            ser.write(msg.encode('utf-8'))
+
+        if USE_UDP and sock is not None:
+            sock.sendto(msg.encode('utf-8'), (ESP32_IP, ESP32_PORT))
 
         timestamp = datetime.datetime.now().isoformat(timespec='milliseconds')
         pose_x = pose_x_std = pose_y = pose_y_std = pose_theta = pose_theta_std = None
 
-        # Print what you send
-        # print("Sent:", msg)
+        # -------- Receive from ESP (prefer serial when enabled) --------
+        # if USE_SERIAL and ser is not None:
+        #     # Non-blocking read: drain all available lines
+        #     # (ESP prints pose often; we'll just parse the latest)
+        #     while ser.in_waiting > 0:
+        #         try:
+        #             line = ser.readline().decode('utf-8', errors='ignore').strip()
+        #         except Exception:
+        #             break
+        #         if not line:
+        #             continue
+        #         parsed = try_parse_pose_line(line)
+        #         if parsed:
+        #             (pose_x, pose_x_std, pose_y, pose_y_std, pose_theta, pose_theta_std) = parsed
+        #             trajectory_x.append(pose_x); trajectory_y.append(pose_y)
+        #             updated = True
+        #             # print("SER pose:", line)  # optional debug
 
-        # Read from ESP32 
-        # while ser.in_waiting > 0:
-        #     response = ser.readline().decode(errors='ignore').strip()
-        #     if response:
-        #         print(response)
-
-        # Non-blocking receive from ESP32
-        ready = select.select([sock], [], [], 0)
-        if ready[0]:
-            data, addr = sock.recvfrom(1024)
-            msg_received = data.decode().strip()
-            print("Received from HAMR:", msg_received)
-
-            match = re.search(
-                r"X:\s*([-\d\.]+)\s*±\s*([-\d\.]+)\s*m,\s*Y:\s*([-\d\.]+)\s*±\s*([-\d\.]+)\s*m,\s*Theta:\s*([-\d\.]+)\s*±\s*([-\d\.]+)", msg_received)
-            if match:
-                pose_x, pose_x_std, pose_y, pose_y_std, pose_theta, pose_theta_std = map(float, match.groups())
-                if pose_x is not None and pose_y is not None:
-                    trajectory_x.append(pose_x)
-                    trajectory_y.append(pose_y)
+        elif USE_UDP and sock is not None:
+            ready = select.select([sock], [], [], 0)
+            if ready[0]:
+                data, addr = sock.recvfrom(1024)
+                line = data.decode('utf-8', errors='ignore').strip()
+                parsed = try_parse_pose_line(line)
+                if parsed:
+                    (pose_x, pose_x_std, pose_y, pose_y_std, pose_theta, pose_theta_std) = parsed
+                    trajectory_x.append(pose_x); trajectory_y.append(pose_y)
                     updated = True
+                    # print("UDP pose:", line)  # optional debug
 
-        if updated:
+        # -------- Plot update (throttled) --------
+        if updated or (time.time() - last_plot) > 0.1:
             traj_plot.set_data(trajectory_x, trajectory_y)
-            ax.relim()
-            ax.autoscale_view()
-            # plt.draw()
-        
-        plt.pause(0.001)  # Refresh Rate
-            
+            ax.relim(); ax.autoscale_view()
+            plt.pause(0.001)
+            last_plot = time.time()
+
+        # -------- Log CSV --------
         csv_writer.writerow([
-        timestamp,
-        left_x, left_y, right_x, right_y, left_trigger, right_trigger, a, b,
-        pose_x, pose_x_std, pose_y, pose_y_std, pose_theta, pose_theta_std
+            timestamp,
+            left_x, left_y, right_x, right_y, left_trigger, right_trigger, a, b,
+            pose_x, pose_x_std, pose_y, pose_y_std, pose_theta, pose_theta_std
         ])
         csv_file.flush()
 
-        time.sleep(0.05)
+        time.sleep(0.02)  # ~50 Hz loop
 
 except KeyboardInterrupt:
     print("\nExiting...")
-    # ser.close()
+finally:
+    if ser:  ser.close()
+    if sock: sock.close()
     pygame.quit()
-    sock.close()
     csv_file.close()
     plt.close(fig)
-
-
