@@ -128,7 +128,7 @@ try:
         #             updated = True
         #             # print("SER pose:", line)  # optional debug
 
-        elif USE_UDP and sock is not None:
+        if USE_UDP and sock is not None:
             ready = select.select([sock], [], [], 0)
             if ready[0]:
                 data, addr = sock.recvfrom(1024)
