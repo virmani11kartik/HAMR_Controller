@@ -1,99 +1,87 @@
 #include <Wire.h>
 #include <Adafruit_VL53L0X.h>
 
-// Define XSHUT pins for each sensor
-#define XSHUT_FRONT 35
-#define XSHUT_LEFT  36
-#define XSHUT_RIGHT 37
-#define XSHUT_BACK  38
+// I2C pins
+#define SDA_PIN 36
+#define SCL_PIN 35
 
-// Create sensor objects
-Adafruit_VL53L0X sensor_front = Adafruit_VL53L0X();
-Adafruit_VL53L0X sensor_left  = Adafruit_VL53L0X();
-Adafruit_VL53L0X sensor_right = Adafruit_VL53L0X();
-Adafruit_VL53L0X sensor_back  = Adafruit_VL53L0X();
+// XSHUT pins for 4 sensors
+#define XSHUT_1 37
+#define XSHUT_2 38
+#define XSHUT_3 39
+#define XSHUT_4 40
+
+// New I2C addresses for each sensor
+#define ADDR_1 0x30
+#define ADDR_2 0x31
+#define ADDR_3 0x32
+#define ADDR_4 0x33
+
+// Sensor objects
+Adafruit_VL53L0X tof1;
+Adafruit_VL53L0X tof2;
+Adafruit_VL53L0X tof3;
+Adafruit_VL53L0X tof4;
+
+void readSensor(Adafruit_VL53L0X &lox, const char *label) {
+  VL53L0X_RangingMeasurementData_t measure;
+  lox.rangingTest(&measure, false);
+  Serial.print(label);
+  Serial.print(": ");
+  if (measure.RangeStatus != 4) {
+    Serial.print(measure.RangeMilliMeter);
+    Serial.println(" mm");
+  } else {
+    Serial.println("Out of range");
+  }
+}
+
+bool initSensor(Adafruit_VL53L0X &lox, int xshutPin, int newAddr) {
+  digitalWrite(xshutPin, HIGH);   // power on
+  delay(50);
+  if (!lox.begin(0x29, false, &Wire)) {
+    return false;
+  }
+  lox.setAddress(newAddr);       // assign unique address
+  delay(10);
+  return true;
+}
 
 void setup() {
   Serial.begin(115200);
+  while (!Serial) delay(1);
 
-  // Initialize I2C on GPIO 39 (SDA) and 40 (SCL)
-  Wire.begin(39, 40);  // SDA = GPIO 39, SCL = GPIO 40
+  // Init I2C
+  Wire.begin(SDA_PIN, SCL_PIN);
 
-  // Set XSHUT pins as OUTPUT
-  pinMode(XSHUT_FRONT, OUTPUT);
-  pinMode(XSHUT_LEFT, OUTPUT);
-  pinMode(XSHUT_RIGHT, OUTPUT);
-  pinMode(XSHUT_BACK, OUTPUT);
+  // Setup XSHUT pins
+  pinMode(XSHUT_1, OUTPUT);
+  pinMode(XSHUT_2, OUTPUT);
+  pinMode(XSHUT_3, OUTPUT);
+  pinMode(XSHUT_4, OUTPUT);
 
-  // Disable all sensors first
-  digitalWrite(XSHUT_FRONT, LOW);
-  digitalWrite(XSHUT_LEFT, LOW);
-  digitalWrite(XSHUT_RIGHT, LOW);
-  digitalWrite(XSHUT_BACK, LOW);
+  // Turn all off
+  digitalWrite(XSHUT_1, LOW);
+  digitalWrite(XSHUT_2, LOW);
+  digitalWrite(XSHUT_3, LOW);
+  digitalWrite(XSHUT_4, LOW);
   delay(10);
 
-  // Initialize each sensor one by one and assign unique I2C addresses
+  // Bring them up one by one and change address
+  if (!initSensor(tof1, XSHUT_1, ADDR_1)) Serial.println("Sensor 1 failed");
+  if (!initSensor(tof2, XSHUT_2, ADDR_2)) Serial.println("Sensor 2 failed");
+  if (!initSensor(tof3, XSHUT_3, ADDR_3)) Serial.println("Sensor 3 failed");
+  if (!initSensor(tof4, XSHUT_4, ADDR_4)) Serial.println("Sensor 4 failed");
 
-  // Front Sensor - 0x30
-  digitalWrite(XSHUT_FRONT, HIGH);
-  delay(10);
-  if (!sensor_front.begin(0x30, &Wire)) {
-    Serial.println("Failed to initialize front sensor!");
-    while (1);
-  }
-
-  // Left Sensor - 0x31
-  digitalWrite(XSHUT_LEFT, HIGH);
-  delay(10);
-  if (!sensor_left.begin(0x31, &Wire)) {
-    Serial.println("Failed to initialize left sensor!");
-    while (1);
-  }
-
-  // Right Sensor - 0x32
-  digitalWrite(XSHUT_RIGHT, HIGH);
-  delay(10);
-  if (!sensor_right.begin(0x32, &Wire)) {
-    Serial.println("Failed to initialize right sensor!");
-    while (1);
-  }
-
-  // Back Sensor - 0x33
-  digitalWrite(XSHUT_BACK, HIGH);
-  delay(10);
-  if (!sensor_back.begin(0x33, &Wire)) {
-    Serial.println("Failed to initialize back sensor!");
-    while (1);
-  }
-
-  Serial.println("All sensors initialized successfully.");
+  Serial.println("All sensors initialized.");
 }
 
+
 void loop() {
-  VL53L0X_RangingMeasurementData_t measure;
-
-  // Front
-  sensor_front.rangingTest(&measure, false);
-  Serial.print("Front: ");
-  Serial.print(measure.RangeStatus != 4 ? measure.RangeMilliMeter : -1);
-  Serial.print(" mm, ");
-
-  // Left
-  sensor_left.rangingTest(&measure, false);
-  Serial.print("Left: ");
-  Serial.print(measure.RangeStatus != 4 ? measure.RangeMilliMeter : -1);
-  Serial.print(" mm, ");
-
-  // Right
-  sensor_right.rangingTest(&measure, false);
-  Serial.print("Right: ");
-  Serial.print(measure.RangeStatus != 4 ? measure.RangeMilliMeter : -1);
-  Serial.print(" mm, ");
-
-  // Back
-  sensor_back.rangingTest(&measure, false);
-  Serial.print("Back: ");
-  Serial.println(measure.RangeStatus != 4 ? measure.RangeMilliMeter : -1);
-
+  readSensor(tof1, "TOF1");
+  readSensor(tof2, "TOF2");
+  readSensor(tof3, "TOF3");
+  readSensor(tof4, "TOF4");
+  Serial.println("----");
   delay(300);
 }

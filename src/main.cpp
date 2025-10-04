@@ -1,4 +1,3 @@
-
 // licensed under the University of Pennsylvania, Version 1.0 (the "License");
 // Kartik Virmani MODLAB-UPENN
 // you may not use this file except in compliance with the License.
@@ -20,6 +19,7 @@
 #include "imu_55.h"
 #include "imu_85.h"
 #include "ekf_localization.h"
+#include <Adafruit_VL53L0X.h>
 
 WebServer server(80);
 
@@ -32,6 +32,23 @@ IMU55 sens(33,34);                 // SDA=4, SCL=5, addr=0x28 by default
 float roll_b,pitch_b,yaw_b;
 //------------EKF CONFIG--------------
 EkfYawConfig cfg;
+
+// TOF OBJECTS
+#define SDA_PIN 36
+#define SCL_PIN 35
+#define XSHUT_1 37
+#define XSHUT_2 38
+#define XSHUT_3 39
+#define XSHUT_4 40
+#define ADDR_1 0x30
+#define ADDR_2 0x31
+#define ADDR_3 0x32
+#define ADDR_4 0x33
+
+Adafruit_VL53L0X tof1;
+Adafruit_VL53L0X tof2;
+Adafruit_VL53L0X tof3;
+Adafruit_VL53L0X tof4;
 
 //---------------------------GLOBALS----------------------
 // UDP SETUP
@@ -122,6 +139,11 @@ float scaleFactor = 1.0; //131.67;
 
 float test = 0.0f;
 
+// TOF Emergency Stop Variables
+const int TOF_STOP_THRESH  = 200;  // stop if any sensor <= this
+const int TOF_CLEAR_THRESH = 240;  // resume only when all >= this (hysteresis)
+bool tof_stop_latched = false;
+
 // Joystick control variables
 float ly = 0.0f;  // left stick vertical (forward/back)
 float rx = 0.0f;  // right stick horizontal (turn)
@@ -152,7 +174,6 @@ volatile float uart_right_cmd = 0.0f;
 volatile float uart_turret_cmd = 0.0f;
 volatile uint32_t last_uart_cmd_ms = 0;
 static uint32_t pose_seq = 0;
-
 // Enc packet sequence
 static uint32_t enc_seq = 0;
 
@@ -289,6 +310,26 @@ void setMotor(int pwmPin, int dirPin, float pwmVal, int channel) {
     digitalWrite(dirPin, LOW);
     ledcWrite(channel, (int)(-pwmVal));
   }
+}
+
+//---------------------------SET TOF-------------------------------
+
+bool initSensor(Adafruit_VL53L0X &lox, int xshutPin, int newAddr) {
+  digitalWrite(xshutPin, HIGH);  
+  delay(50);
+  if (!lox.begin(0x29, false, &Wire)) {
+    return false;
+  }
+  lox.setAddress(newAddr);      
+  delay(10);
+  return true;
+}
+
+inline int readTofMm(Adafruit_VL53L0X &lox) {
+  VL53L0X_RangingMeasurementData_t m;
+  lox.rangingTest(&m, false);
+  if (m.RangeStatus != 4) return (int)m.RangeMilliMeter; 
+  return 99999; 
 }
 
 //---------------------------UDP TRANSMISSION (IF WIFI)-------------
@@ -453,6 +494,23 @@ void setup() {
   lastPidTime = millis();
   lastTurretTime = millis();
 
+  ///TOF Pins and Setup
+  Wire.begin(SDA_PIN, SCL_PIN);
+  pinMode(XSHUT_1, OUTPUT);
+  pinMode(XSHUT_2, OUTPUT);
+  pinMode(XSHUT_3, OUTPUT);
+  pinMode(XSHUT_4, OUTPUT);
+  digitalWrite(XSHUT_1, LOW);
+  digitalWrite(XSHUT_2, LOW);
+  digitalWrite(XSHUT_3, LOW);
+  digitalWrite(XSHUT_4, LOW);
+  delay(10);
+  if (!initSensor(tof1, XSHUT_1, ADDR_1)) Serial.println("Sensor 1 failed");
+  if (!initSensor(tof2, XSHUT_2, ADDR_2)) Serial.println("Sensor 2 failed");
+  if (!initSensor(tof3, XSHUT_3, ADDR_3)) Serial.println("Sensor 3 failed");
+  if (!initSensor(tof4, XSHUT_4, ADDR_4)) Serial.println("Sensor 4 failed");
+  Serial.println("All sensors initialized.");
+
   Serial.println("Low Level Control Ready");
   Serial.println("Send joystick data like: LX:0.00 LY:0.00 RX:0.00 RY:0.00 LT:0.00 RT:0.00 A:0 B:0 X:0 Y:0");
   Serial.printf("Initial Speed PWM: %.0f\n", basePWM);
@@ -610,6 +668,33 @@ void loop() {
   unsigned long now = millis();
   if (now - lastPidTime >= PID_INTERVAL) {
     float dt = (now - lastPidTime) / 1000.0;
+    ////=================== SAFETY STOP ==================////
+    int d1 = readTofMm(tof1);
+    int d2 = readTofMm(tof2);
+    int d3 = readTofMm(tof3);
+    int d4 = readTofMm(tof4);
+    Serial.printf("TOF: [%d %d %d %d]  latch=%d\n", d1,d2,d3,d4,(int)tof_stop_latched);
+    int min_d = min(min(d1, d2), min(d3, d4));
+
+    if (!tof_stop_latched && min_d <= TOF_STOP_THRESH) {
+    tof_stop_latched = true;
+    } else if (tof_stop_latched && d1 >= TOF_CLEAR_THRESH && d2 >= TOF_CLEAR_THRESH
+              && d3 >= TOF_CLEAR_THRESH && d4 >= TOF_CLEAR_THRESH) {
+      tof_stop_latched = false;
+    }
+
+    if (tof_stop_latched) {
+      integralL = integralR = 0.0f;
+      lastErrL = lastErrR = 0.0f;
+      pwmL_out = 0.0f;
+      pwmR_out = 0.0f;
+      // pwmT_out = 0.0f;
+      setMotor(pwmL, dirL, pwmL_out, 0);
+      setMotor(pwmR, dirR, pwmR_out, 1);
+      // setMotor(pwmT, dirT, pwmT_out, 2);
+      lastPidTime = now;
+      return;
+    }
 
     ////=================== DRIVE CONTROL =================////
     // Read encoder counts atomically
@@ -883,6 +968,7 @@ void loop() {
     // }
     lastOdometryTime = now;
   }
+  delay(10); 
 }
 
 
