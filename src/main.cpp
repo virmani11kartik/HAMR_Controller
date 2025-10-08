@@ -34,8 +34,8 @@ float roll_b,pitch_b,yaw_b;
 EkfYawConfig cfg;
 
 // TOF OBJECTS
-#define SDA_PIN 36
-#define SCL_PIN 35
+#define TOF_SDA_PIN 36
+#define TOF_SCL_PIN 35
 #define XSHUT_1 37
 #define XSHUT_2 38
 #define XSHUT_3 39
@@ -49,6 +49,15 @@ Adafruit_VL53L0X tof1;
 Adafruit_VL53L0X tof2;
 Adafruit_VL53L0X tof3;
 Adafruit_VL53L0X tof4;
+
+// ===== TOF ↔ control =====
+volatile int      g_tof_mm[4]       = {99999,99999,99999,99999};
+volatile uint32_t g_tof_stamp_us[4] = {0,0,0,0};
+volatile bool     g_tof_valid[4]    = {false,false,false,false};
+portMUX_TYPE      g_tofMux = portMUX_INITIALIZER_UNLOCKED;
+TwoWire WireTof = TwoWire(1);
+SemaphoreHandle_t i2cMutex = NULL;
+constexpr uint32_t TOF_FRESHNESS_US = 250000;  // 150 ms max age for using a reading
 
 //---------------------------GLOBALS----------------------
 // UDP SETUP
@@ -314,22 +323,113 @@ void setMotor(int pwmPin, int dirPin, float pwmVal, int channel) {
 
 //---------------------------SET TOF-------------------------------
 
-bool initSensor(Adafruit_VL53L0X &lox, int xshutPin, int newAddr) {
-  digitalWrite(xshutPin, HIGH);  
-  delay(50);
-  if (!lox.begin(0x29, false, &Wire)) {
+bool initOneTof(Adafruit_VL53L0X &lox, int xshutPin, uint8_t newAddr) {
+  pinMode(xshutPin, OUTPUT);
+  digitalWrite(xshutPin, LOW);
+  delay(5);
+  digitalWrite(xshutPin, HIGH);
+  delay(50);                
+
+  if (!lox.begin(0x29, false, &WireTof)) {
+    Serial.printf("[ToF 0x%02X] begin @0x29 FAILED\n", newAddr);
     return false;
   }
-  lox.setAddress(newAddr);      
-  delay(10);
+  lox.setAddress(newAddr);
+  delay(10);                
+  Serial.printf("[ToF 0x%02X] addressed OK\n", newAddr);
   return true;
 }
 
-inline int readTofMm(Adafruit_VL53L0X &lox) {
+bool initAllTof() {
+  pinMode(XSHUT_1, OUTPUT);
+  pinMode(XSHUT_2, OUTPUT);
+  pinMode(XSHUT_3, OUTPUT);
+  pinMode(XSHUT_4, OUTPUT);
+  digitalWrite(XSHUT_1, LOW);
+  digitalWrite(XSHUT_2, LOW);
+  digitalWrite(XSHUT_3, LOW);
+  digitalWrite(XSHUT_4, LOW);
+  delay(10);
+
+  bool ok = true;
+  ok &= initOneTof(tof1, XSHUT_1, ADDR_1);
+  ok &= initOneTof(tof2, XSHUT_2, ADDR_2);
+  ok &= initOneTof(tof3, XSHUT_3, ADDR_3);
+  ok &= initOneTof(tof4, XSHUT_4, ADDR_4);
+
+  digitalWrite(XSHUT_1, HIGH);
+  digitalWrite(XSHUT_2, HIGH);
+  digitalWrite(XSHUT_3, HIGH);
+  digitalWrite(XSHUT_4, HIGH);
+  return ok;
+}
+
+inline int readTofMm_nb(Adafruit_VL53L0X &lox, uint8_t &statusOut) {
   VL53L0X_RangingMeasurementData_t m;
-  lox.rangingTest(&m, false);
-  if (m.RangeStatus != 4) return (int)m.RangeMilliMeter; 
-  return 99999; 
+  lox.rangingTest(&m, false);           
+  statusOut = m.RangeStatus;
+  if (m.RangeStatus == 4)   return 99999;  
+  if (m.RangeMilliMeter > 8000) return 99999;  
+  return (int)m.RangeMilliMeter;
+}
+
+void tof_task(void*){
+  int stuck_count = 0;
+  int bad_burst   = 0;
+  int last_d[4] = { -1, -1, -1, -1 };
+  uint8_t s1,s2,s3,s4;
+
+  WireTof.setClock(400000);
+  WireTof.setTimeOut(5);
+
+  for(;;){
+    int d1 = readTofMm_nb(tof1, s1);
+    int d2 = readTofMm_nb(tof2, s2);
+    int d3 = readTofMm_nb(tof3, s3);
+    int d4 = readTofMm_nb(tof4, s4);
+
+    uint32_t now_us = micros();
+    taskENTER_CRITICAL(&g_tofMux);
+    g_tof_mm[0] = d1; g_tof_stamp_us[0] = now_us; g_tof_valid[0] = (d1 != 99999);
+    g_tof_mm[1] = d2; g_tof_stamp_us[1] = now_us; g_tof_valid[1] = (d2 != 99999);
+    g_tof_mm[2] = d3; g_tof_stamp_us[2] = now_us; g_tof_valid[2] = (d3 != 99999);
+    g_tof_mm[3] = d4; g_tof_stamp_us[3] = now_us; g_tof_valid[3] = (d4 != 99999);
+    taskEXIT_CRITICAL(&g_tofMux);
+
+    int invalids = (d1==99999) + (d2==99999) + (d3==99999) + (d4==99999);
+    
+    if (invalids == 4) {
+      bad_burst++;
+    } else {
+      bad_burst = max(0, bad_burst - 1); 
+    }
+
+    if (bad_burst > 20) {
+      pinMode(XSHUT_1, OUTPUT); pinMode(XSHUT_2, OUTPUT);
+      pinMode(XSHUT_3, OUTPUT); pinMode(XSHUT_4, OUTPUT);
+      digitalWrite(XSHUT_1, LOW); digitalWrite(XSHUT_2, LOW);
+      digitalWrite(XSHUT_3, LOW); digitalWrite(XSHUT_4, LOW);
+      delay(50);  
+      WireTof.begin(TOF_SDA_PIN, TOF_SCL_PIN);
+      WireTof.setClock(100000);
+      WireTof.setTimeOut(50);
+      initAllTof();
+      bad_burst = 0;
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    
+    static uint32_t last_dbg_ms = 0; 
+    if (millis() - last_dbg_ms > 500)  
+    { 
+      if (invalids > 0) {  
+        Serial.printf("[TOF] %d %d %d %d (bad_burst=%d invalids=%d)\n", 
+                      d1, d2, d3, d4, bad_burst, invalids); 
+      }
+      last_dbg_ms = millis(); 
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(10));  
+  }
 }
 
 //---------------------------UDP TRANSMISSION (IF WIFI)-------------
@@ -495,22 +595,18 @@ void setup() {
   lastTurretTime = millis();
 
   ///TOF Pins and Setup
-  Wire.begin(SDA_PIN, SCL_PIN);
-  pinMode(XSHUT_1, OUTPUT);
+  WireTof.begin(TOF_SDA_PIN, TOF_SCL_PIN);
+  WireTof.setClock(100000);  
+  WireTof.setTimeOut(50);
+  pinMode(XSHUT_1, OUTPUT); 
   pinMode(XSHUT_2, OUTPUT);
-  pinMode(XSHUT_3, OUTPUT);
+  pinMode(XSHUT_3, OUTPUT); 
   pinMode(XSHUT_4, OUTPUT);
-  digitalWrite(XSHUT_1, LOW);
-  digitalWrite(XSHUT_2, LOW);
-  digitalWrite(XSHUT_3, LOW);
-  digitalWrite(XSHUT_4, LOW);
-  delay(10);
-  if (!initSensor(tof1, XSHUT_1, ADDR_1)) Serial.println("Sensor 1 failed");
-  if (!initSensor(tof2, XSHUT_2, ADDR_2)) Serial.println("Sensor 2 failed");
-  if (!initSensor(tof3, XSHUT_3, ADDR_3)) Serial.println("Sensor 3 failed");
-  if (!initSensor(tof4, XSHUT_4, ADDR_4)) Serial.println("Sensor 4 failed");
-  Serial.println("All sensors initialized.");
-
+  i2cMutex = xSemaphoreCreateMutex();
+  if (!initAllTof()) {
+    Serial.println("ToF init had errors; watchdog will retry.");
+  }
+  xTaskCreatePinnedToCore(tof_task, "tof", 4096, nullptr, 2, nullptr, 0); 
   Serial.println("Low Level Control Ready");
   Serial.println("Send joystick data like: LX:0.00 LY:0.00 RX:0.00 RY:0.00 LT:0.00 RT:0.00 A:0 B:0 X:0 Y:0");
   Serial.printf("Initial Speed PWM: %.0f\n", basePWM);
@@ -669,31 +765,33 @@ void loop() {
   if (now - lastPidTime >= PID_INTERVAL) {
     float dt = (now - lastPidTime) / 1000.0;
     ////=================== SAFETY STOP ==================////
-    int d1 = readTofMm(tof1);
-    int d2 = readTofMm(tof2);
-    int d3 = readTofMm(tof3);
-    int d4 = readTofMm(tof4);
-    Serial.printf("TOF: [%d %d %d %d]  latch=%d\n", d1,d2,d3,d4,(int)tof_stop_latched);
-    int min_d = min(min(d1, d2), min(d3, d4));
+    int d[4]; uint32_t s[4]; bool v[4];
+    taskENTER_CRITICAL(&g_tofMux);
+    for (int i=0;i<4;i++){ d[i]=g_tof_mm[i]; s[i]=g_tof_stamp_us[i]; v[i]=g_tof_valid[i]; }
+    taskEXIT_CRITICAL(&g_tofMux);
 
+    uint32_t now_us = micros();
+    for (int i=0;i<4;i++){
+      if (!v[i] || (now_us - s[i]) > TOF_FRESHNESS_US) d[i] = 99999;
+    }
+
+    int min_d = min(min(d[0], d[1]), min(d[2], d[3]));
     if (!tof_stop_latched && min_d <= TOF_STOP_THRESH) {
-    tof_stop_latched = true;
-    } else if (tof_stop_latched && d1 >= TOF_CLEAR_THRESH && d2 >= TOF_CLEAR_THRESH
-              && d3 >= TOF_CLEAR_THRESH && d4 >= TOF_CLEAR_THRESH) {
+      tof_stop_latched = true;
+    } else if (tof_stop_latched &&
+              d[0] >= TOF_CLEAR_THRESH && d[1] >= TOF_CLEAR_THRESH &&
+              d[2] >= TOF_CLEAR_THRESH && d[3] >= TOF_CLEAR_THRESH) {
       tof_stop_latched = false;
     }
 
     if (tof_stop_latched) {
       integralL = integralR = 0.0f;
       lastErrL = lastErrR = 0.0f;
-      pwmL_out = 0.0f;
-      pwmR_out = 0.0f;
-      // pwmT_out = 0.0f;
+      pwmL_out = pwmR_out = 0.0f;
       setMotor(pwmL, dirL, pwmL_out, 0);
       setMotor(pwmR, dirR, pwmR_out, 1);
-      // setMotor(pwmT, dirT, pwmT_out, 2);
       lastPidTime = now;
-      return;
+      return;   
     }
 
     ////=================== DRIVE CONTROL =================////
