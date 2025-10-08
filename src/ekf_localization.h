@@ -24,6 +24,8 @@ static bool g_aligned = false;
 static float g_yaw_offset = 0.0f;
 static unsigned long g_last_realignment_ms = 0;
 static int g_large_innovation_count = 0;
+static float theta_prev_wrapped = 0.0f;
+static float theta_unwrapped = 0.0f;
 
 inline void ekfYawResetAlignment() {
     g_aligned = false;
@@ -113,7 +115,7 @@ inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConf
     robot_theta= wrapToPi(robot_theta + Kt * y);
 
     // P <- (I-KH)P(I-KH)^T + K R K^T ; with H=[0 0 1]
-    float HP[3] = {P[2], P[5], P[8]};
+    float HP[3] = {P[6], P[7], P[8]};
 
     // Update covariance: P = P - K*(H*P)
     // Row 0: P(x,·)
@@ -160,5 +162,14 @@ inline void getEkfAlignmentInfo(bool& is_aligned, float& offset_deg, unsigned lo
     offset_deg = g_yaw_offset * 180.0f / M_PI;
     last_alignment_ms = g_last_realignment_ms;
 }
+
+inline void updateThetaUnwrapped(float theta_wrapped_now){
+    float theta_now_wrapped = getRobotTheta();
+    float d = wrapToPi(theta_wrapped_now - theta_prev_wrapped); // small, wrapped diff
+    theta_unwrapped += d;                                       // continuous total
+    theta_prev_wrapped = theta_wrapped_now;
+}
+
+float getRobotThetaUnwrapped(){ return theta_unwrapped; }
 
 #endif // EKF_LOCALIZATION_H

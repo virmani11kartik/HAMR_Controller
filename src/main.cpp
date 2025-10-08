@@ -19,6 +19,8 @@
 #include "imu_55.h"
 #include "imu_85.h"
 #include "ekf_localization.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <Adafruit_VL53L0X.h>
 
 WebServer server(80);
@@ -30,6 +32,18 @@ const char* password = "123571113";
 //------------IMU OBJECT--------------
 IMU55 sens(33,34);                 // SDA=4, SCL=5, addr=0x28 by default
 float roll_b,pitch_b,yaw_b;
+// ===== IMU ↔ control =====
+volatile float    g_yaw_latest = 0.0f;      // last IMU yaw (wrapped)
+volatile uint32_t g_yaw_latest_us = 0;      // micros() when last sample arrived
+volatile bool     g_yaw_valid = false;      // becomes true after 1st good sample
+static uint32_t   g_yaw_last_used_us = 0;   // EKF consumer: last stamp consumed
+
+// tiny critical section to protect multi-field updates across cores
+portMUX_TYPE g_imuMux = portMUX_INITIALIZER_UNLOCKED;
+
+// How old can an IMU sample be for fusion?
+constexpr uint32_t IMU_FRESHNESS_US = 150000;  // 50 ms
+
 //------------EKF CONFIG--------------
 EkfYawConfig cfg;
 
@@ -320,6 +334,32 @@ void setMotor(int pwmPin, int dirPin, float pwmVal, int channel) {
     ledcWrite(channel, (int)(-pwmVal));
   }
 }
+
+//---------------------------IMU FREE RTOS TASK---------------------
+void imu_task(void*){
+  if (!sens.begin()) {
+    Serial.println("IMU init failed");
+    for(;;){ vTaskDelay(pdMS_TO_TICKS(1000)); }
+  }
+  // sens.setMinCalibrationLevel(2);
+  // sens.setDataTimeout(5);  // <= 5–10 ms, NOT 1000 ms
+  const TickType_t period = pdMS_TO_TICKS(5);  // ~200 Hz poll cadence
+  TickType_t last = xTaskGetTickCount();
+  for(;;){
+    if (sens.update()) {
+      float r, p, y;
+      sens.getRPY(r, p, y);            
+      // Store
+      taskENTER_CRITICAL(&g_imuMux);
+      g_yaw_latest    = y;     
+      g_yaw_latest_us = micros();
+      g_yaw_valid     = true;
+      taskEXIT_CRITICAL(&g_imuMux);
+    }
+    vTaskDelayUntil(&last, period);      // periodic sleep (no busy wait)
+  }
+}
+
 
 //---------------------------SET TOF-------------------------------
 
@@ -612,13 +652,15 @@ void setup() {
   Serial.printf("Initial Speed PWM: %.0f\n", basePWM);
 
   ///=========== IMU_BASE SETUP =========////
+  // Launch IMU task on core 0; keep Arduino loop on core 1
+  xTaskCreatePinnedToCore(imu_task, "imu", 4096, nullptr, 1, nullptr, 0);
   // while (!Serial) {}
   // if (!sens.begin()) {
   //   Serial.println("IMU init failed. Check wiring/address.");
   //   while (1) delay(1000);
   // }
   // sens.setMinCalibrationLevel(2); 
-  // sens.setDataTimeout(1000);
+  // sens.setDataTimeout(5);
 }
 
 void loop() {
@@ -1013,7 +1055,22 @@ void loop() {
   if(now- lastOdometryTime >= ODOMETRY_INTERVAL) {
     // Update odometry every ODOMETRY_INTERVAL ms
     updateOdometry(); // KF-Prediction step
-    ekfYawUpdate(yaw_b, cfg);//KF - Update step updates robot_x, robot_y, robot_theta, covariance
+    float    yaw_sample = 0.0f;
+    uint32_t stamp_us   = 0;
+    bool     valid      = false;
+    
+    taskENTER_CRITICAL(&g_imuMux);
+    yaw_sample = g_yaw_latest;
+    stamp_us   = g_yaw_latest_us;
+    valid      = g_yaw_valid;
+    taskEXIT_CRITICAL(&g_imuMux);
+
+    if (valid && stamp_us > g_yaw_last_used_us &&
+      (micros() - stamp_us) < IMU_FRESHNESS_US) {
+      ekfYawUpdate(yaw_sample, cfg);       // correction
+      g_yaw_last_used_us = stamp_us;       // mark consumed
+    }
+  
     // updateSampledPoseFromLastDelta();
     // transmitPoseData();
 

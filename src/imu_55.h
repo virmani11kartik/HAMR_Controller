@@ -55,7 +55,7 @@ private:
   bool stored_ = false;
   bool resequenced_ = false;
   uint32_t zeroStart_ = 0;
-  bool data_valid_ = false;
+  bool data_valid_ = true;
   unsigned long last_valid_data_ms_ = 0;
   unsigned long data_timeout_ms_ = 1000; // 1 second timeout
   uint8_t min_calib_level_ = 2;
