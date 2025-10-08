@@ -37,11 +37,7 @@ volatile float    g_yaw_latest = 0.0f;      // last IMU yaw (wrapped)
 volatile uint32_t g_yaw_latest_us = 0;      // micros() when last sample arrived
 volatile bool     g_yaw_valid = false;      // becomes true after 1st good sample
 static uint32_t   g_yaw_last_used_us = 0;   // EKF consumer: last stamp consumed
-
-// tiny critical section to protect multi-field updates across cores
 portMUX_TYPE g_imuMux = portMUX_INITIALIZER_UNLOCKED;
-
-// How old can an IMU sample be for fusion?
 constexpr uint32_t IMU_FRESHNESS_US = 150000;  // 50 ms
 
 //------------EKF CONFIG--------------
@@ -258,18 +254,12 @@ void transmitPoseData() {
     pose.type = TYPE_POSE;
     pose.seq = ++pose_seq;
     pose.t_tx_ns = (uint64_t)micros() * 1000ull;
-    
-    // Get current pose (after EKF fusion)
     pose.x = getRobotX();
     pose.y = getRobotY();
     pose.theta = getRobotTheta();
-    
-    // Get uncertainties (standard deviations)
     pose.sigma_x = getUncertaintyX();
     pose.sigma_y = getUncertaintyY();
     pose.sigma_theta = getUncertaintyTheta();
-    
-    // Set EKF status flag
     if (sens.getStatus() == IMU_OK && sens.isDataValid()) {
         pose.ekf_status = 1; // EKF fused
     } else if (sens.getStatus() != IMU_INIT_FAILED) {
@@ -277,9 +267,7 @@ void transmitPoseData() {
     } else {
         pose.ekf_status = 0; // Odometry only
     }
-    
     pose.crc16 = crc16_surrogate((uint8_t*)&pose, POSE_SIZE - 2);
-    
     Serial0.write((uint8_t*)&pose, POSE_SIZE);
 }
 
@@ -346,7 +334,7 @@ void imu_task(void*){
   const TickType_t period = pdMS_TO_TICKS(5);  // ~200 Hz poll cadence
   TickType_t last = xTaskGetTickCount();
   for(;;){
-    if (sens.update()) {
+      sens.update();
       float r, p, y;
       sens.getRPY(r, p, y);            
       // Store
@@ -355,13 +343,11 @@ void imu_task(void*){
       g_yaw_latest_us = micros();
       g_yaw_valid     = true;
       taskEXIT_CRITICAL(&g_imuMux);
-    }
-    vTaskDelayUntil(&last, period);      // periodic sleep (no busy wait)
+    vTaskDelayUntil(&last, period);      
   }
 }
 
-
-//---------------------------SET TOF-------------------------------
+//---------------------------TOF FREE RTOS TASK-------------------------------
 
 bool initOneTof(Adafruit_VL53L0X &lox, int xshutPin, uint8_t newAddr) {
   pinMode(xshutPin, OUTPUT);
@@ -462,8 +448,9 @@ void tof_task(void*){
     if (millis() - last_dbg_ms > 500)  
     { 
       if (invalids > 0) {  
-        Serial.printf("[TOF] %d %d %d %d (bad_burst=%d invalids=%d)\n", 
-                      d1, d2, d3, d4, bad_burst, invalids); 
+        // Serial.printf("[TOF] %d %d %d %d (bad_burst=%d invalids=%d)\n", 
+        //               d1, d2, d3, d4, bad_burst, invalids); 
+        continue;
       }
       last_dbg_ms = millis(); 
     }
@@ -647,29 +634,12 @@ void setup() {
     Serial.println("ToF init had errors; watchdog will retry.");
   }
   xTaskCreatePinnedToCore(tof_task, "tof", 4096, nullptr, 2, nullptr, 0); 
-  Serial.println("Low Level Control Ready");
-  Serial.println("Send joystick data like: LX:0.00 LY:0.00 RX:0.00 RY:0.00 LT:0.00 RT:0.00 A:0 B:0 X:0 Y:0");
-  Serial.printf("Initial Speed PWM: %.0f\n", basePWM);
 
   ///=========== IMU_BASE SETUP =========////
-  // Launch IMU task on core 0; keep Arduino loop on core 1
   xTaskCreatePinnedToCore(imu_task, "imu", 4096, nullptr, 1, nullptr, 0);
-  // while (!Serial) {}
-  // if (!sens.begin()) {
-  //   Serial.println("IMU init failed. Check wiring/address.");
-  //   while (1) delay(1000);
-  // }
-  // sens.setMinCalibrationLevel(2); 
-  // sens.setDataTimeout(5);
 }
 
 void loop() {
-
-  //=======IMU_BASE READ=======
-    // sens.update();
-    // sens.getRPY(roll_b,pitch_b,yaw_b);
-    // Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
-    // Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
 
   //-------------------------MICRO_ROS_PROTCOL-------------------------------
   // ---- RX: parse commands (robust to CMD or CMD3) ----
@@ -735,9 +705,6 @@ void loop() {
   }
     
   //-----------------------TELEOP PROTOCOL------------------------------
-  // Handle serial commands, Read joystick data from serial
-
-  // Serial.setTimeout(5);
   if (Serial.available()) {          
     String msg = Serial.readStringUntil('\n');
     msg.trim();
@@ -1045,7 +1012,6 @@ void loop() {
                 ", T_angle=" + String(currentAngleT, 2);
     // Serial.println(status);
     // sendUDP(status);
-
   }
   
   // delay(100);

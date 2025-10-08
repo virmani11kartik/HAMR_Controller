@@ -153,7 +153,7 @@ void IMU55::update() {
     saveCalibrationToNVS();
     stored_ = true;
   }
-  // updateStatus();
+  updateStatus();
 }
 
 void IMU55::getRPY(float& roll, float& pitch, float& yaw) {
