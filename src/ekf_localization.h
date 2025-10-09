@@ -4,10 +4,12 @@
 #include <math.h>
 #include "odometry.h"
 
-inline float wrapToPi(float a){
-    while(a>M_PI) a -=2.0*M_PI;
-    while(a<-M_PI) a +=2.0*M_PI;
-    return a;
+
+inline float wrapToPi(float a) {
+    const float two_pi = 2.0f * M_PI;
+    float x = fmodf(a + M_PI, two_pi);
+    if (x < 0) x += two_pi;   // ensure [0, 2π)
+    return x - M_PI;          // -> (-π, π]
 }
 
 struct EkfYawConfig {
