@@ -10,6 +10,7 @@ inline float wrapToPi(float a){
     return a;
 }
 
+
 struct EkfYawConfig {
     float R_yaw_rad2 = (10.0f * M_PI/180.0f) * (10.0f * M_PI/180.0f); // IMU yaw measurement noise (rad^2)
     float gate_sigma = 3.0f;
@@ -52,7 +53,7 @@ inline bool shouldRealign(float innovation, const EkfYawConfig& cfg) {
     return false;
 }
 
-
+// only for yaw
 inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConfig()){
     if (!isfinite(imu_yaw_rad)) {
         Serial.println("EKF: Invalid IMU yaw measurement");
@@ -156,6 +157,8 @@ inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConf
 
     return true; // Measurement accepted and state updated
 }
+
+
 
 inline void getEkfAlignmentInfo(bool& is_aligned, float& offset_deg, unsigned long& last_alignment_ms) {
     is_aligned = g_aligned;
