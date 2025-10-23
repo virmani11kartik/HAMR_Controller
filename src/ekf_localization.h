@@ -86,7 +86,7 @@ inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConf
     if (shouldRealign(y, cfg)) {
         g_yaw_offset = wrapToPi(robot_theta - imu_yaw_rad);
         g_last_realignment_ms = millis();
-        g_large_innovation_count = 0;
+        g_large_innovation_count = 1;
         z = wrapToPi(imu_yaw_rad + g_yaw_offset);
         y = wrapToPi(z - robot_theta);
     }

@@ -104,7 +104,7 @@ float Kp_R = 120.0f, Ki_R = 40.0f, Kd_R = 0.0f;   // tune per wheel
 // Encoder & motor specs
 const int CPR = 64;
 const int GEAR_RATIO = 150;
-const int TICKS_PER_WHEEL_REV = CPR * GEAR_RATIO; // 9600 ticks per wheel revolution
+const int TICKS_PER_WHEEL_REV = CPR *0.5*GEAR_RATIO; // 9600 ticks per wheel revolution
 
 // Turret motor specs
 const int TICKS_PER_TURRET_REV = 2704; // 13 PPR × 2 (quadrature) × 104 (gear ratio) = 2704 ticks/rev at output
@@ -195,6 +195,15 @@ volatile uint32_t last_uart_cmd_ms = 0;
 static uint32_t pose_seq = 0;
 // Enc packet sequence
 static uint32_t enc_seq = 0;
+
+
+
+
+// IMU starts at -0.7 radians
+constexpr float IMU_BOOT_BIAS_RAD = 0.0f;
+
+
+
 
 #pragma pack(push,1)
 struct CmdPacket {
@@ -336,10 +345,24 @@ void imu_task(void*){
   for(;;){
       sens.update();
       float r, p, y;
-      sens.getRPY(r, p, y);            
+      sens.getRPY(r, p, y);
+
+
+      float y_corr = wrapToPi(y + IMU_BOOT_BIAS_RAD);
+
+      // Debug (optional): show both raw and corrected (in deg for readability)
+
+
+      // sens.update();
+      Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
+      // Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", r,p,y_corr);
+      Serial.printf("Roll=%.2f° Pitch=%.2f° Yaw=%.2f°\n",
+                    r * 180.0 / M_PI,
+                    p * 180.0 / M_PI,
+                    y_corr * 180.0 / M_PI);
       // Store
       taskENTER_CRITICAL(&g_imuMux);
-      g_yaw_latest    = y;     
+      g_yaw_latest    = y_corr;     
       g_yaw_latest_us = micros();
       g_yaw_valid     = true;
       taskEXIT_CRITICAL(&g_imuMux);
@@ -640,7 +663,11 @@ void setup() {
 }
 
 void loop() {
-
+  //=======IMU_BASE READ=======
+  // sens.update();
+  // sens.getRPY(roll_b,pitch_b,yaw_b);
+  // Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
+  // Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
   //-------------------------MICRO_ROS_PROTCOL-------------------------------
   // ---- RX: parse commands (robust to CMD or CMD3) ----
   static uint8_t buf[64];      // big enough for CMD3 (48 bytes) + slack
