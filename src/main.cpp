@@ -104,7 +104,7 @@ float Kp_R = 120.0f, Ki_R = 40.0f, Kd_R = 0.0f;   // tune per wheel
 // Encoder & motor specs
 const int CPR = 64;
 const int GEAR_RATIO = 150;
-const int TICKS_PER_WHEEL_REV = CPR *0.5*GEAR_RATIO; // 9600 ticks per wheel revolution
+const int TICKS_PER_WHEEL_REV = CPR * GEAR_RATIO; // 9600 ticks per wheel revolution
 
 // Turret motor specs
 const int TICKS_PER_TURRET_REV = 2704; // 13 PPR × 2 (quadrature) × 104 (gear ratio) = 2704 ticks/rev at output
@@ -199,9 +199,9 @@ static uint32_t enc_seq = 0;
 
 
 
-// IMU starts at -0.7 radians
-constexpr float IMU_BOOT_BIAS_RAD = 0.0f;
-
+volatile float g_roll_deg  = 0.0f;
+volatile float g_pitch_deg = 0.0f;
+volatile float g_yaw_deg   = 0.0f;
 
 
 
@@ -338,35 +338,39 @@ void imu_task(void*){
     Serial.println("IMU init failed");
     for(;;){ vTaskDelay(pdMS_TO_TICKS(1000)); }
   }
-  // sens.setMinCalibrationLevel(2);
-  // sens.setDataTimeout(5);  // <= 5–10 ms, NOT 1000 ms
-  const TickType_t period = pdMS_TO_TICKS(5);  // ~200 Hz poll cadence
-  TickType_t last = xTaskGetTickCount();
+
+  const TickType_t period        = pdMS_TO_TICKS(5);    // ~200 Hz sampling
+  const TickType_t print_period  = pdMS_TO_TICKS(100);  // ~10 Hz printing
+  TickType_t last       = xTaskGetTickCount();
+  TickType_t next_print = last;
+
   for(;;){
-      sens.update();
-      float r, p, y;
-      sens.getRPY(r, p, y);
+    sens.update();
 
+    // read in radians
+    float r, p, y;
+    sens.getRPY(r, p, y);
 
-      float y_corr = wrapToPi(y + IMU_BOOT_BIAS_RAD);
+    // publish to shared state (quick, no prints inside)
+    taskENTER_CRITICAL(&g_imuMux);
+    g_yaw_latest    = y;
+    g_yaw_latest_us = micros();
+    g_yaw_valid     = true;
 
-      // Debug (optional): show both raw and corrected (in deg for readability)
+    // also keep degree copies for display consumers
+    g_roll_deg  = r * 180.0f / M_PI;
+    g_pitch_deg = p * 180.0f / M_PI;
+    g_yaw_deg   = y * 180.0f / M_PI;
+    taskEXIT_CRITICAL(&g_imuMux);
 
+    // print at ~10 Hz, using locals so no mutex while printing
+    if (xTaskGetTickCount() >= next_print) {
+      float rd = g_roll_deg, pd = g_pitch_deg, yd = g_yaw_deg; // quick snapshot
+      Serial.printf("IMU RPY (deg): roll=%.1f  pitch=%.1f  yaw=%.1f\n", rd, pd, yd);
+      next_print += print_period;
+    }
 
-      // sens.update();
-      Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
-      // Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", r,p,y_corr);
-      Serial.printf("Roll=%.2f° Pitch=%.2f° Yaw=%.2f°\n",
-                    r * 180.0 / M_PI,
-                    p * 180.0 / M_PI,
-                    y_corr * 180.0 / M_PI);
-      // Store
-      taskENTER_CRITICAL(&g_imuMux);
-      g_yaw_latest    = y_corr;     
-      g_yaw_latest_us = micros();
-      g_yaw_valid     = true;
-      taskEXIT_CRITICAL(&g_imuMux);
-    vTaskDelayUntil(&last, period);      
+    vTaskDelayUntil(&last, period);
   }
 }
 
@@ -471,8 +475,8 @@ void tof_task(void*){
     if (millis() - last_dbg_ms > 500)  
     { 
       if (invalids > 0) {  
-        // Serial.printf("[TOF] %d %d %d %d (bad_burst=%d invalids=%d)\n", 
-        //               d1, d2, d3, d4, bad_burst, invalids); 
+      //   Serial.printf("[TOF] %d %d %d %d (bad_burst=%d invalids=%d)\n", 
+      //                 d1, d2, d3, d4, bad_burst, invalids); 
         continue;
       }
       last_dbg_ms = millis(); 
@@ -481,6 +485,7 @@ void tof_task(void*){
     vTaskDelay(pdMS_TO_TICKS(10));  
   }
 }
+
 
 //---------------------------UDP TRANSMISSION (IF WIFI)-------------
 void sendUDP(String msg) {
@@ -645,29 +650,25 @@ void setup() {
   lastTurretTime = millis();
 
   ///TOF Pins and Setup
-  WireTof.begin(TOF_SDA_PIN, TOF_SCL_PIN);
-  WireTof.setClock(100000);  
-  WireTof.setTimeOut(50);
-  pinMode(XSHUT_1, OUTPUT); 
-  pinMode(XSHUT_2, OUTPUT);
-  pinMode(XSHUT_3, OUTPUT); 
-  pinMode(XSHUT_4, OUTPUT);
-  i2cMutex = xSemaphoreCreateMutex();
-  if (!initAllTof()) {
-    Serial.println("ToF init had errors; watchdog will retry.");
-  }
-  xTaskCreatePinnedToCore(tof_task, "tof", 4096, nullptr, 2, nullptr, 0); 
+  // WireTof.begin(TOF_SDA_PIN, TOF_SCL_PIN);
+  // WireTof.setClock(100000);  
+  // WireTof.setTimeOut(50);
+  // pinMode(XSHUT_1, OUTPUT); 
+  // pinMode(XSHUT_2, OUTPUT);
+  // pinMode(XSHUT_3, OUTPUT); 
+  // pinMode(XSHUT_4, OUTPUT);
+  // i2cMutex = xSemaphoreCreateMutex();
+  // if (!initAllTof()) {
+  //   Serial.println("ToF init had errors; watchdog will retry.");
+  // }
+  // xTaskCreatePinnedToCore(tof_task, "tof", 4096, nullptr, 2, nullptr, 0); 
 
   ///=========== IMU_BASE SETUP =========////
   xTaskCreatePinnedToCore(imu_task, "imu", 4096, nullptr, 1, nullptr, 0);
 }
 
 void loop() {
-  //=======IMU_BASE READ=======
-  // sens.update();
-  // sens.getRPY(roll_b,pitch_b,yaw_b);
-  // Serial.println(sens.isCalibrated() ? "Fully Calibrated" : "Not Calibrated");
-  // Serial.printf("Roll=%.2f Pitch=%.2f Yaw=%.2f\n", roll_b,pitch_b,yaw_b);
+
   //-------------------------MICRO_ROS_PROTCOL-------------------------------
   // ---- RX: parse commands (robust to CMD or CMD3) ----
   static uint8_t buf[64];      // big enough for CMD3 (48 bytes) + slack
@@ -717,8 +718,8 @@ void loop() {
       uint16_t calc = crc16_surrogate((uint8_t*)&cmd3, CMD3_SIZE - 2);
       if (calc == cmd3.crc16) {
         noInterrupts();
-        uart_left_cmd   = cmd3.left * -1;
-        uart_right_cmd  = cmd3.right * -1;
+        uart_left_cmd   = cmd3.right * -1;
+        uart_right_cmd  = cmd3.left * -1; 
         uart_turret_cmd = cmd3.turret;
         last_uart_cmd_ms = millis();
         interrupts();
@@ -801,34 +802,34 @@ void loop() {
   if (now - lastPidTime >= PID_INTERVAL) {
     float dt = (now - lastPidTime) / 1000.0;
     ////=================== SAFETY STOP ==================////
-    int d[4]; uint32_t s[4]; bool v[4];
-    taskENTER_CRITICAL(&g_tofMux);
-    for (int i=0;i<4;i++){ d[i]=g_tof_mm[i]; s[i]=g_tof_stamp_us[i]; v[i]=g_tof_valid[i]; }
-    taskEXIT_CRITICAL(&g_tofMux);
+    // int d[4]; uint32_t s[4]; bool v[4];
+    // taskENTER_CRITICAL(&g_tofMux);
+    // for (int i=0;i<4;i++){ d[i]=g_tof_mm[i]; s[i]=g_tof_stamp_us[i]; v[i]=g_tof_valid[i]; }
+    // taskEXIT_CRITICAL(&g_tofMux);
 
-    uint32_t now_us = micros();
-    for (int i=0;i<4;i++){
-      if (!v[i] || (now_us - s[i]) > TOF_FRESHNESS_US) d[i] = 99999;
-    }
+    // uint32_t now_us = micros();
+    // for (int i=0;i<4;i++){
+    //   if (!v[i] || (now_us - s[i]) > TOF_FRESHNESS_US) d[i] = 99999;
+    // }
 
-    int min_d = min(min(d[0], d[1]), min(d[2], d[3]));
-    if (!tof_stop_latched && min_d <= TOF_STOP_THRESH) {
-      tof_stop_latched = true;
-    } else if (tof_stop_latched &&
-              d[0] >= TOF_CLEAR_THRESH && d[1] >= TOF_CLEAR_THRESH &&
-              d[2] >= TOF_CLEAR_THRESH && d[3] >= TOF_CLEAR_THRESH) {
-      tof_stop_latched = false;
-    }
+    // int min_d = min(min(d[0], d[1]), min(d[2], d[3]));
+    // if (!tof_stop_latched && min_d <= TOF_STOP_THRESH) {
+    //   tof_stop_latched = true;
+    // } else if (tof_stop_latched &&
+    //           d[0] >= TOF_CLEAR_THRESH && d[1] >= TOF_CLEAR_THRESH &&
+    //           d[2] >= TOF_CLEAR_THRESH && d[3] >= TOF_CLEAR_THRESH) {
+    //   tof_stop_latched = false;
+    // }
 
-    if (tof_stop_latched) {
-      integralL = integralR = 0.0f;
-      lastErrL = lastErrR = 0.0f;
-      pwmL_out = pwmR_out = 0.0f;
-      setMotor(pwmL, dirL, pwmL_out, 0);
-      setMotor(pwmR, dirR, pwmR_out, 1);
-      lastPidTime = now;
-      return;   
-    }
+    // if (tof_stop_latched) {
+    //   integralL = integralR = 0.0f;
+    //   lastErrL = lastErrR = 0.0f;
+    //   pwmL_out = pwmR_out = 0.0f;
+    //   setMotor(pwmL, dirL, pwmL_out, 0);
+    //   setMotor(pwmR, dirR, pwmR_out, 1);
+    //   lastPidTime = now;
+    //   return;   
+    // }
 
     ////=================== DRIVE CONTROL =================////
     // Read encoder counts atomically
@@ -1063,7 +1064,13 @@ void loop() {
       ekfYawUpdate(yaw_sample, cfg);       // correction
       g_yaw_last_used_us = stamp_us;       // mark consumed
     }
-  
+
+    static uint32_t last_imu_dbg = 0;
+    if (millis() - last_imu_dbg > 1000) {
+      sens.printStatus();  
+      last_imu_dbg = millis();
+    }
+      
     // updateSampledPoseFromLastDelta();
     // transmitPoseData();
 
@@ -1118,7 +1125,6 @@ void loop() {
   }
   delay(10); 
 }
-
 
 
 
