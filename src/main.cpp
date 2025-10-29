@@ -196,15 +196,6 @@ static uint32_t pose_seq = 0;
 // Enc packet sequence
 static uint32_t enc_seq = 0;
 
-
-
-
-volatile float g_roll_deg  = 0.0f;
-volatile float g_pitch_deg = 0.0f;
-volatile float g_yaw_deg   = 0.0f;
-
-
-
 #pragma pack(push,1)
 struct CmdPacket {
   uint16_t magic, ver, type;
@@ -338,39 +329,21 @@ void imu_task(void*){
     Serial.println("IMU init failed");
     for(;;){ vTaskDelay(pdMS_TO_TICKS(1000)); }
   }
-
-  const TickType_t period        = pdMS_TO_TICKS(5);    // ~200 Hz sampling
-  const TickType_t print_period  = pdMS_TO_TICKS(100);  // ~10 Hz printing
-  TickType_t last       = xTaskGetTickCount();
-  TickType_t next_print = last;
-
+  // sens.setMinCalibrationLevel(2);
+  // sens.setDataTimeout(5);  // <= 5–10 ms, NOT 1000 ms
+  const TickType_t period = pdMS_TO_TICKS(5);  // ~200 Hz poll cadence
+  TickType_t last = xTaskGetTickCount();
   for(;;){
-    sens.update();
-
-    // read in radians
-    float r, p, y;
-    sens.getRPY(r, p, y);
-
-    // publish to shared state (quick, no prints inside)
-    taskENTER_CRITICAL(&g_imuMux);
-    g_yaw_latest    = y;
-    g_yaw_latest_us = micros();
-    g_yaw_valid     = true;
-
-    // also keep degree copies for display consumers
-    g_roll_deg  = r * 180.0f / M_PI;
-    g_pitch_deg = p * 180.0f / M_PI;
-    g_yaw_deg   = y * 180.0f / M_PI;
-    taskEXIT_CRITICAL(&g_imuMux);
-
-    // print at ~10 Hz, using locals so no mutex while printing
-    if (xTaskGetTickCount() >= next_print) {
-      float rd = g_roll_deg, pd = g_pitch_deg, yd = g_yaw_deg; // quick snapshot
-      Serial.printf("IMU RPY (deg): roll=%.1f  pitch=%.1f  yaw=%.1f\n", rd, pd, yd);
-      next_print += print_period;
-    }
-
-    vTaskDelayUntil(&last, period);
+      sens.update();
+      float r, p, y;
+      sens.getRPY(r, p, y);            
+      // Store
+      taskENTER_CRITICAL(&g_imuMux);
+      g_yaw_latest    = y;     
+      g_yaw_latest_us = micros();
+      g_yaw_valid     = true;
+      taskEXIT_CRITICAL(&g_imuMux);
+    vTaskDelayUntil(&last, period);      
   }
 }
 
@@ -1125,6 +1098,7 @@ void loop() {
   }
   delay(10); 
 }
+
 
 
 
