@@ -6,8 +6,8 @@
 #include "odometry.h"
 
 inline float wrapToPi(float a){
-    while (a >  (float)M_PI) a -= 2.0f * (float)M_PI; 
-    while (a < -(float)M_PI) a += 2.0f * (float)M_PI;
+    while (a >  M_PI) a -= 2.0f * M_PI;
+    while (a < -M_PI) a += 2.0f * M_PI;
     return a;
 }
 
@@ -66,7 +66,7 @@ inline bool ekfYawUpdate(float imu_yaw_rad, const EkfYawConfig& cfg = EkfYawConf
         g_yaw_offset = wrapToPi(robot_theta - imu_yaw_rad);
         g_aligned = true;
         g_last_realignment_ms = millis();
-        g_large_innovation_count = 1;
+        g_large_innovation_count = 0;
         Serial.printf("EKF: Yaw %saligned, offset=%.2f deg\n",
                       prev_last == 0 ? "" : "re-",
                       g_yaw_offset * 180.0f / M_PI);
