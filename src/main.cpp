@@ -334,9 +334,38 @@ void imu_task(void*){
   const TickType_t period = pdMS_TO_TICKS(5);  // ~200 Hz poll cadence
   TickType_t last = xTaskGetTickCount();
   for(;;){
+    
       sens.update();
-      float r, p, y;
-      sens.getRPY(r, p, y);            
+
+
+
+
+      float head_deg, roll_deg, pitch_deg;
+      sens.getRawEulerDeg(head_deg, roll_deg, pitch_deg);
+
+      // Also show your wrapped yaw (radians, [-pi, pi])
+      float r,p,y;
+      sens.getRPY(r, p, y);
+
+      // Calibration snapshot (cached by IMU55::updateStatus)
+      uint8_t sys, g, a, m;
+      sens.getCalibrationLevels(sys, g, a, m);
+
+      // Status & data age (seconds) for quick sanity checks
+      IMUStatus st = sens.getStatus();
+      float age_s  = sens.getDataAge();   // already used by printStatus()
+
+      // One concise line that is easy to grep/sync in logs
+      Serial.printf("[IMU] RAW_YAW_DEG=%.2f  YAW_RAD=%.3f  ROLL=%.2fdeg  PITCH=%.2fdeg  "
+                    "CAL(S,G,A,M)=(%u,%u,%u,%u)  STATUS=%d  AGE=%.0fms\n",
+                    head_deg, y, roll_deg, pitch_deg,
+                    sys, g, a, m, (int)st, age_s * 1000.0f);
+
+
+
+                    
+      // float r, p, y;
+      // sens.getRPY(r, p, y);            
       // Store
       taskENTER_CRITICAL(&g_imuMux);
       g_yaw_latest    = y;     
@@ -346,6 +375,10 @@ void imu_task(void*){
     vTaskDelayUntil(&last, period);      
   }
 }
+
+
+
+
 
 //---------------------------TOF FREE RTOS TASK-------------------------------
 
@@ -1098,3 +1131,6 @@ void loop() {
   }
   delay(10); 
 }
+
+
+
