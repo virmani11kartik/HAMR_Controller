@@ -193,8 +193,10 @@ void updateOdometry() {
     float old_theta = robot_theta;
 
     // Update robot pose using differential drive kinematics
-    robot_x += delta_trans * cos(robot_theta + delta_rot/2.0);
-    robot_y += delta_trans * sin(robot_theta + delta_rot/2.0);
+    robot_x += delta_trans * -sin(robot_theta + delta_rot/2.0);
+    robot_y += delta_trans * cos(robot_theta + delta_rot/2.0);
+    // robot_x += delta_trans * cos(robot_theta + delta_rot/2.0);   //old
+    // robot_y += delta_trans * sin(robot_theta + delta_rot/2.0);
     robot_theta += delta_rot;
     
     // Normalize theta to [-PI, PI]
@@ -237,15 +239,20 @@ void updateOdometry() {
     // jacobian of the motion model wrt pose
     float mid_theta = old_theta + delta_rot1;
     float G[9] = {
-        1, 0, -delta_trans * sin(mid_theta),
-        0, 1,  delta_trans * cos(mid_theta),
+        1, 0, -delta_trans * cos(mid_theta),
+        0, 1, -delta_trans * sin(mid_theta),
         0, 0,  1
     };
-
+    // old 
+    // float G[9] = {
+    //     1, 0, -delta_trans * sin(mid_theta),
+    //     0, 1,  delta_trans * cos(mid_theta),
+    //     0, 0,  1
+    // };
     // jacobian of the motion model wrt control
     float V[9] = {
+        -delta_trans * cos(mid_theta), -sin(mid_theta), 0,
         -delta_trans * sin(mid_theta), cos(mid_theta), 0,
-         delta_trans * cos(mid_theta), sin(mid_theta), 0,
          1, 0, 1
     };
 

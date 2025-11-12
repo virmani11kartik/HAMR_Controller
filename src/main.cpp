@@ -104,7 +104,7 @@ float Kp_R = 120.0f, Ki_R = 40.0f, Kd_R = 0.0f;   // tune per wheel
 // Encoder & motor specs
 const int CPR = 64;
 const int GEAR_RATIO = 150;
-const int TICKS_PER_WHEEL_REV = CPR * GEAR_RATIO; // 9600 ticks per wheel revolution
+const int TICKS_PER_WHEEL_REV = (CPR * GEAR_RATIO) / 2; // 9600 ticks per wheel revolution
 
 // Turret motor specs
 const int TICKS_PER_TURRET_REV = 2704; // 13 PPR × 2 (quadrature) × 104 (gear ratio) = 2704 ticks/rev at output
