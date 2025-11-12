@@ -254,7 +254,7 @@ void transmitPoseData() {
     pose.type = TYPE_POSE;
     pose.seq = ++pose_seq;
     pose.t_tx_ns = (uint64_t)micros() * 1000ull;
-    pose.x = getRobotX();
+    pose.x = -1.0 * getRobotX();
     pose.y = getRobotY();
     pose.theta = getRobotTheta();
     pose.sigma_x = getUncertaintyX();

@@ -167,8 +167,8 @@ void updateOdometry() {
     long currentTicksR = ticksR;
     interrupts();
     
-    long deltaLeft = currentTicksL - prevTicksL;
-    long deltaRight = currentTicksR - prevTicksR;
+    long deltaLeft = -(currentTicksL - prevTicksL);
+    long deltaRight = -(currentTicksR - prevTicksR);
 
     // Update previous ticks
     prevTicksL = currentTicksL;
@@ -310,8 +310,8 @@ void updateSampledPoseFromLastDelta() {
     float noisy_trans = last_delta_trans + gaussianRandom(0.0, sqrt(ALPHA3 * fabs(last_delta_trans) + ALPHA4 * (fabs(last_delta_rot1) + fabs(last_delta_rot2))));
     float noisy_rot2  = last_delta_rot2 + gaussianRandom(0.0, sqrt(ALPHA1 * fabs(last_delta_rot2) + ALPHA2 * fabs(last_delta_trans)));
 
-    robot_x += noisy_trans * cos(robot_theta + noisy_rot1);
-    robot_y += noisy_trans * sin(robot_theta + noisy_rot1);
+    robot_x += noisy_trans * -sin(robot_theta + noisy_rot1);
+    robot_y += noisy_trans * cos(robot_theta + noisy_rot1);
     robot_theta += noisy_rot1 + noisy_rot2;
 
     // Normalize angle
