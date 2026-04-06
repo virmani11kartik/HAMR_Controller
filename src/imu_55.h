@@ -40,6 +40,11 @@ public:
   void printStatus() const;
   void forceRecalibration();
 
+
+    // Seperate print status
+  void getRawEulerDeg(float& heading_deg, float& roll_deg, float& pitch_deg) const;
+  float getRawYawDeg() const;
+
 private:
   bool loadCalibrationFromNVS();   // CONFIG -> offsets -> ext crystal -> NDOF + kick
   void saveCalibrationToNVS();     // save once when fully calibrated

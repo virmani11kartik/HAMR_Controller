@@ -78,7 +78,8 @@ bool IMU55::loadCalibrationFromNVS() {
       offs.accel_radius,   offs.mag_radius);
   }
   bno_.setExtCrystalUse(true);  delay(10);
-  bno_.setMode(OPERATION_MODE_NDOF); delay(20);
+  bno_.setMode(OPERATION_MODE_IMUPLUS); delay(20);  // This doens't use NDOF, which 'removes' the jump
+  // bno_.setMode(OPERATION_MODE_NDOF); delay(20);
 
   // kick fusion
   for (int i=0;i<3;++i){ bno_.getEvent(&e_, Adafruit_BNO055::VECTOR_EULER); delay(10); }
@@ -102,6 +103,34 @@ void IMU55::clearCalNVS() {
   Serial.println("Calibration offsets cleared from NVS.");
 }
 
+// Since MAG will often be 0, change the conditions
+void IMU55::updateStatus() {
+  bno_.getCalibration(&last_sys_, &last_gyro_, &last_accel_, &last_mag_);
+
+  // Consider only SYS/GYRO/ACCEL for IMU+.
+  uint8_t min_required = min_calib_level_;
+  bool ok_cal = (last_sys_  >= 1) &&           // SYS tends to be 1–3 in IMU+
+                (last_gyro_ >= min_required) &&
+                (last_accel_>= min_required);
+
+  if (!ok_cal) {
+    status_ = IMU_NOT_CALIBRATED;
+    data_valid_ = false;
+    return;
+  }
+
+  if (!isfinite(e_.orientation.x) || !isfinite(e_.orientation.y) || !isfinite(e_.orientation.z)) {
+    status_ = IMU_DATA_INVALID;
+    data_valid_ = false;
+    return;
+  }
+
+  status_ = IMU_OK;
+  data_valid_ = true;
+  last_valid_data_ms_ = millis();
+}
+
+/*
 void IMU55::updateStatus() {
   bno_.getCalibration(&last_sys_, &last_gyro_, &last_accel_, &last_mag_);
   if (last_sys_ == 0 && last_gyro_ == 0 && last_accel_ == 0 && last_mag_ == 0) {
@@ -126,7 +155,7 @@ void IMU55::updateStatus() {
   status_ = IMU_OK;
   data_valid_ = true;
   last_valid_data_ms_ = millis();
-}
+} */
 
 void IMU55::update() {
   bno_.getEvent(&e_, Adafruit_BNO055::VECTOR_EULER);
@@ -140,7 +169,8 @@ void IMU55::update() {
         Serial.println("Calib stuck at zeros; re-sequencing NDOF…");
         bno_.setMode(OPERATION_MODE_CONFIG); delay(25);
         bno_.setExtCrystalUse(true);         delay(10);
-        bno_.setMode(OPERATION_MODE_NDOF);   delay(25);
+        bno_.setMode(OPERATION_MODE_IMUPLUS);   delay(25);
+        // bno_.setMode(OPERATION_MODE_NDOF);   delay(25);
         for (int i=0;i<3;++i){ bno_.getEvent(&e_, Adafruit_BNO055::VECTOR_EULER); delay(10); }
         resequenced_ = true;
       }
@@ -168,7 +198,8 @@ bool IMU55::isCalibrated() {
   uint8_t sys,g,a,m;
   bno_.getCalibration(&sys,&g,&a,&m);
   Serial.printf("Calibration (SYS,G,A,M)=(%u,%u,%u,%u)\n", sys,g,a,m);
-  return (sys==3 && g==3 && a==3 && m==3);
+  // return (sys==3 && g==3 && a==3 && m==3);
+  return (g >= 2 && a >= 2);    //ignoring m
 }
 
 void IMU55::getCalibrationLevels(uint8_t& sys, uint8_t& gyro, uint8_t& accel, uint8_t& mag) {
@@ -202,4 +233,15 @@ void IMU55::forceRecalibration() {
     delay(10);
   }
   status_ = IMU_NOT_CALIBRATED;
+}
+
+void IMU55::getRawEulerDeg(float& heading_deg, float& roll_deg, float& pitch_deg) const {
+  // e_.orientation is updated by update()
+  heading_deg = e_.orientation.x;  // "heading" a.k.a. yaw (deg) from fusion
+  roll_deg    = e_.orientation.y;  // roll (deg)
+  pitch_deg   = e_.orientation.z;  // pitch (deg)
+}
+
+float IMU55::getRawYawDeg() const {
+  return e_.orientation.x;
 }

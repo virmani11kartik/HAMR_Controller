@@ -104,7 +104,7 @@ float Kp_R = 120.0f, Ki_R = 40.0f, Kd_R = 0.0f;   // tune per wheel
 // Encoder & motor specs
 const int CPR = 64;
 const int GEAR_RATIO = 150;
-const int TICKS_PER_WHEEL_REV = CPR * GEAR_RATIO; // 9600 ticks per wheel revolution
+const int TICKS_PER_WHEEL_REV = (CPR * GEAR_RATIO) / 2; // 9600 ticks per wheel revolution
 
 // Turret motor specs
 const int TICKS_PER_TURRET_REV = 2704; // 13 PPR × 2 (quadrature) × 104 (gear ratio) = 2704 ticks/rev at output
@@ -254,7 +254,7 @@ void transmitPoseData() {
     pose.type = TYPE_POSE;
     pose.seq = ++pose_seq;
     pose.t_tx_ns = (uint64_t)micros() * 1000ull;
-    pose.x = getRobotX();
+    pose.x = -1.0 * getRobotX();
     pose.y = getRobotY();
     pose.theta = getRobotTheta();
     pose.sigma_x = getUncertaintyX();
@@ -334,9 +334,38 @@ void imu_task(void*){
   const TickType_t period = pdMS_TO_TICKS(5);  // ~200 Hz poll cadence
   TickType_t last = xTaskGetTickCount();
   for(;;){
+    
       sens.update();
-      float r, p, y;
-      sens.getRPY(r, p, y);            
+
+
+
+
+      float head_deg, roll_deg, pitch_deg;
+      sens.getRawEulerDeg(head_deg, roll_deg, pitch_deg);
+
+      // Also show your wrapped yaw (radians, [-pi, pi])
+      float r,p,y;
+      sens.getRPY(r, p, y);
+
+      // Calibration snapshot (cached by IMU55::updateStatus)
+      uint8_t sys, g, a, m;
+      sens.getCalibrationLevels(sys, g, a, m);
+
+      // Status & data age (seconds) for quick sanity checks
+      IMUStatus st = sens.getStatus();
+      float age_s  = sens.getDataAge();   // already used by printStatus()
+
+      // One concise line that is easy to grep/sync in logs
+      Serial.printf("[IMU] RAW_YAW_DEG=%.2f  YAW_RAD=%.3f  ROLL=%.2fdeg  PITCH=%.2fdeg  "
+                    "CAL(S,G,A,M)=(%u,%u,%u,%u)  STATUS=%d  AGE=%.0fms\n",
+                    head_deg, y, roll_deg, pitch_deg,
+                    sys, g, a, m, (int)st, age_s * 1000.0f);
+
+
+
+                    
+      // float r, p, y;
+      // sens.getRPY(r, p, y);            
       // Store
       taskENTER_CRITICAL(&g_imuMux);
       g_yaw_latest    = y;     
@@ -346,6 +375,10 @@ void imu_task(void*){
     vTaskDelayUntil(&last, period);      
   }
 }
+
+
+
+
 
 //---------------------------TOF FREE RTOS TASK-------------------------------
 
@@ -1098,7 +1131,6 @@ void loop() {
   }
   delay(10); 
 }
-
 
 
 

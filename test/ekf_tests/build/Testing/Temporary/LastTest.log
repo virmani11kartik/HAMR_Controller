@@ -1,0 +1,94 @@
+Start testing: Oct 17 17:18 EDT
+----------------------------------------------------------
+1/2 Testing: test_ekf
+1/2 Test: test_ekf
+Command: "/home/para/HAMR/HAMR_Controller/test/ekf_tests/build/test_ekf"
+Directory: /home/para/HAMR/HAMR_Controller/test/ekf_tests/build
+"test_ekf" start time: Oct 17 17:18 EDT
+Output:
+----------------------------------------------------------
+Running main() from /home/para/HAMR/HAMR_Controller/test/ekf_tests/build/_deps/googletest-src/googletest/src/gtest_main.cc
+[==========] Running 3 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 1 test from MathUtils
+[ RUN      ] MathUtils.WrapToPi
+/home/para/HAMR/HAMR_Controller/test/ekf_tests/tests/test_ekf.cpp:41: Failure
+The difference between wrapToPi(3.1415927f) and 3.1415927f is 6.2831852436065674, which exceeds 1e-6, where
+wrapToPi(3.1415927f) evaluates to -3.1415925025939941,
+3.1415927f evaluates to 3.1415927410125732, and
+1e-6 evaluates to 9.9999999999999995e-07.
+
+/home/para/HAMR/HAMR_Controller/test/ekf_tests/tests/test_ekf.cpp:42: Failure
+The difference between wrapToPi(-3.1415927f) and -3.1415927f is 6.2831852436065674, which exceeds 1e-6, where
+wrapToPi(-3.1415927f) evaluates to 3.1415925025939941,
+-3.1415927f evaluates to -3.1415927410125732, and
+1e-6 evaluates to 9.9999999999999995e-07.
+
+[  FAILED  ] MathUtils.WrapToPi (0 ms)
+[----------] 1 test from MathUtils (0 ms total)
+
+[----------] 2 tests from EKFYaw
+[ RUN      ] EKFYaw.InitialAlignAndInnovation
+EKF: Yaw aligned, offset=20.00 deg
+[       OK ] EKFYaw.InitialAlignAndInnovation (0 ms)
+[ RUN      ] EKFYaw.RealignmentOnLargeInnovationBurst
+EKF: Yaw aligned, offset=0.00 deg
+/home/para/HAMR/HAMR_Controller/test/ekf_tests/tests/test_ekf.cpp:93: Failure
+The difference between g_yaw_offset and wrapToPi(robot_theta - imu_yaw) is 0.087266460061073303, which exceeds 0.05f, where
+g_yaw_offset evaluates to 0.1745329350233078,
+wrapToPi(robot_theta - imu_yaw) evaluates to 0.2617993950843811, and
+0.05f evaluates to 0.05000000074505806.
+
+[  FAILED  ] EKFYaw.RealignmentOnLargeInnovationBurst (0 ms)
+[----------] 2 tests from EKFYaw (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 3 tests from 2 test suites ran. (0 ms total)
+[  PASSED  ] 1 test.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] MathUtils.WrapToPi
+[  FAILED  ] EKFYaw.RealignmentOnLargeInnovationBurst
+
+ 2 FAILED TESTS
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Failed.
+"test_ekf" end time: Oct 17 17:18 EDT
+"test_ekf" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/2 Testing: test_odometry
+2/2 Test: test_odometry
+Command: "/home/para/HAMR/HAMR_Controller/test/ekf_tests/build/test_odometry"
+Directory: /home/para/HAMR/HAMR_Controller/test/ekf_tests/build
+"test_odometry" start time: Oct 17 17:18 EDT
+Output:
+----------------------------------------------------------
+Running main() from /home/para/HAMR/HAMR_Controller/test/ekf_tests/build/_deps/googletest-src/googletest/src/gtest_main.cc
+[==========] Running 3 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 3 tests from Odometry
+[ RUN      ] Odometry.StraightLine
+Odometry initialized : Probabilistic Motion Model with Encoder Noise
+[       OK ] Odometry.StraightLine (0 ms)
+[ RUN      ] Odometry.PureRotation
+Odometry initialized : Probabilistic Motion Model with Encoder Noise
+[       OK ] Odometry.PureRotation (0 ms)
+[ RUN      ] Odometry.CovarianceGrowth
+Odometry initialized : Probabilistic Motion Model with Encoder Noise
+[       OK ] Odometry.CovarianceGrowth (0 ms)
+[----------] 3 tests from Odometry (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 3 tests from 1 test suite ran. (0 ms total)
+[  PASSED  ] 3 tests.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_odometry" end time: Oct 17 17:18 EDT
+"test_odometry" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 17 17:18 EDT

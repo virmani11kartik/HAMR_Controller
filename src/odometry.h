@@ -167,8 +167,8 @@ void updateOdometry() {
     long currentTicksR = ticksR;
     interrupts();
     
-    long deltaLeft = currentTicksL - prevTicksL;
-    long deltaRight = currentTicksR - prevTicksR;
+    long deltaLeft = -(currentTicksL - prevTicksL);
+    long deltaRight = -(currentTicksR - prevTicksR);
 
     // Update previous ticks
     prevTicksL = currentTicksL;
@@ -193,8 +193,10 @@ void updateOdometry() {
     float old_theta = robot_theta;
 
     // Update robot pose using differential drive kinematics
-    robot_x += delta_trans * cos(robot_theta + delta_rot/2.0);
-    robot_y += delta_trans * sin(robot_theta + delta_rot/2.0);
+    robot_x += delta_trans * -sin(robot_theta + delta_rot/2.0);
+    robot_y += delta_trans * cos(robot_theta + delta_rot/2.0);
+    // robot_x += delta_trans * cos(robot_theta + delta_rot/2.0);   //old
+    // robot_y += delta_trans * sin(robot_theta + delta_rot/2.0);
     robot_theta += delta_rot;
     
     // Normalize theta to [-PI, PI]
@@ -237,15 +239,20 @@ void updateOdometry() {
     // jacobian of the motion model wrt pose
     float mid_theta = old_theta + delta_rot1;
     float G[9] = {
-        1, 0, -delta_trans * sin(mid_theta),
-        0, 1,  delta_trans * cos(mid_theta),
+        1, 0, -delta_trans * cos(mid_theta),
+        0, 1, -delta_trans * sin(mid_theta),
         0, 0,  1
     };
-
+    // old 
+    // float G[9] = {
+    //     1, 0, -delta_trans * sin(mid_theta),
+    //     0, 1,  delta_trans * cos(mid_theta),
+    //     0, 0,  1
+    // };
     // jacobian of the motion model wrt control
     float V[9] = {
+        -delta_trans * cos(mid_theta), -sin(mid_theta), 0,
         -delta_trans * sin(mid_theta), cos(mid_theta), 0,
-         delta_trans * cos(mid_theta), sin(mid_theta), 0,
          1, 0, 1
     };
 
@@ -303,8 +310,8 @@ void updateSampledPoseFromLastDelta() {
     float noisy_trans = last_delta_trans + gaussianRandom(0.0, sqrt(ALPHA3 * fabs(last_delta_trans) + ALPHA4 * (fabs(last_delta_rot1) + fabs(last_delta_rot2))));
     float noisy_rot2  = last_delta_rot2 + gaussianRandom(0.0, sqrt(ALPHA1 * fabs(last_delta_rot2) + ALPHA2 * fabs(last_delta_trans)));
 
-    robot_x += noisy_trans * cos(robot_theta + noisy_rot1);
-    robot_y += noisy_trans * sin(robot_theta + noisy_rot1);
+    robot_x += noisy_trans * -sin(robot_theta + noisy_rot1);
+    robot_y += noisy_trans * cos(robot_theta + noisy_rot1);
     robot_theta += noisy_rot1 + noisy_rot2;
 
     // Normalize angle
