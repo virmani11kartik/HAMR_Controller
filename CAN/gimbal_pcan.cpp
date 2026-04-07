@@ -7,24 +7,11 @@
 #include <string>
 #include <windows.h>
 
-// ═════════════════════════════════════════════════════════
-// CONTROL MODE — change this one line to switch modes
-// ═════════════════════════════════════════════════════════
+
 enum class ControlMode { Position, Torque };
 static constexpr ControlMode CONTROL_MODE = ControlMode::Position;
 
-// When CONTROL_MODE == Torque:
-//   "move <roll> <pitch>" interprets the values as Amps (e.g. 0.5 = 0.5 A)
-//   Positive = forward torque, negative = reverse torque
-//   The motor runs open-loop — no settle check, just streams torque commands
-//   Safe range for RMD L-7015: start with ±0.3 A, max rated ~5 A
-//
-// When CONTROL_MODE == Position:
-//   "move <roll> <pitch>" interprets the values as degrees
-//   Motor runs closed-loop to the target angle and waits until settled
-// ═════════════════════════════════════════════════════════
 
-// ── Minimal PCAN types (no PCANBasic.h) ──────────────────
 typedef WORD  TPCANHandle;
 typedef BYTE  TPCANType;
 typedef DWORD TPCANBaudrate;
