@@ -51,6 +51,11 @@ static const float PITCH_MOUNT_OFFSET_DEG = -90.0f;
 // ---------------------- App timing ------------------------------------
 static const uint16_t SAMPLE_MS = 20; // 50 Hz
 
+// ---------------------- PD gains --------------------------------------
+// Direct edit marker: PD controller enabled for IMU leveling.
+static float k_p = 1.0f;
+static float k_d = 0.5f;
+
 // ---------------------- State flags -----------------------------------
 bool can_ok = false;
 bool imu_ok = false;
@@ -184,13 +189,32 @@ void setup() {
 
 void loop() {
     static uint32_t t0 = millis();
+    static float prev_roll_error = 0.0f;
+    static float prev_pitch_error = 0.0f;
+    static bool first_pd_sample = true;
 
     float roll = 0, pitch = 0, yaw = 0, acc = 0;
     if (sense.readOrientation(roll, pitch, yaw, acc)) {
-        // Negate to counteract the measured tilt.
-        // Flip signs here if a motor runs in the wrong direction.
-        float roll_target  = -roll;
-        float pitch_target = -pitch;
+        float dt = (millis() - t0) / 1000.0f;
+        if (dt <= 0.0f) dt = SAMPLE_MS / 1000.0f;
+
+        // Target is a level IMU, so error is opposite the measured tilt.
+        float roll_error  = -roll;
+        float pitch_error = -pitch;
+
+        float roll_derivative = 0.0f;
+        float pitch_derivative = 0.0f;
+        if (!first_pd_sample) {
+            roll_derivative  = (roll_error - prev_roll_error) / dt;
+            pitch_derivative = (pitch_error - prev_pitch_error) / dt;
+        }
+
+        prev_roll_error = roll_error;
+        prev_pitch_error = pitch_error;
+        first_pd_sample = false;
+
+        float roll_target  = (k_p * roll_error) + (k_d * roll_derivative);
+        float pitch_target = (k_p * pitch_error) + (k_d * pitch_derivative);
 
         // Hard clamp — never exceed ±GIMBAL_MAX_DEG regardless of IMU reading.
         if (roll_target  >  GIMBAL_MAX_DEG) roll_target  =  GIMBAL_MAX_DEG;
@@ -203,12 +227,17 @@ void loop() {
         pitch_target += PITCH_MOUNT_OFFSET_DEG;
 
         sendAbsPosition(MOTOR_ROLL,  roll_target,  GIMBAL_MAX_DPS);
-        sendAbsPosition(MOTOR_PITCH, pitch_target, GIMBAL_MAX_DPS);
+        sendAbsPosition(MOTOR_PITCH, 0, GIMBAL_MAX_DPS);
 
         Serial0.printf("IMU  roll=%+7.2f  pitch=%+7.2f  yaw=%+7.2f\n", roll, pitch, yaw);
-        Serial0.printf("CMD  roll=%+7.2f  pitch=%+7.2f\n", roll_target, pitch_target);
+        Serial0.printf("ERR  roll=%+7.2f  pitch=%+7.2f\n", roll_error, pitch_error);
+        Serial0.printf("CMD  roll=%+7.2f  pitch=%+7.2f  Kp=%.3f  Kd=%.3f\n", roll_target, pitch_target, k_p, k_d);
+        delay(50);
     } else {
         Serial0.println("[WARN] No IMU data — stopping motors");
+        first_pd_sample = true;
+        prev_roll_error = 0.0f;
+        prev_pitch_error = 0.0f;
         motorStop(MOTOR_ROLL);
         motorStop(MOTOR_PITCH);
     }
