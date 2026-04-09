@@ -39,14 +39,20 @@ static const uint8_t CMD_MOTOR_STOP     = 0x81;
 // Raise once you've confirmed direction is correct.
 static const uint16_t GIMBAL_MAX_DPS = 100;
 
+// Roll PD gains — tune Kp first (start small), then add Kd to damp oscillation.
+static const float ROLL_KP     = 0.08f;  // proportional: deg of motor per deg of tilt
+static const float ROLL_KD     = 0.1f; // derivative:   damps overshoot (deg per deg/s)
+static const float DERIV_ALPHA = 0.15f; // EMA smoothing on derivative (0=frozen, 1=raw)
+static const float IMU_ALPHA   = 0.25f; // EMA smoothing on IMU roll input (0=frozen, 1=raw)
+
 // Hard position clamp — motors never commanded beyond this,
 // regardless of IMU reading (prevents self-collision).
 static const float GIMBAL_MAX_DEG = 20.0f;
 
 // Mechanical mounting offset — motor's encoder zero is this many degrees
 // away from the physical neutral position. +90 = motor zero is 90° ACW from level.
-static const float ROLL_MOUNT_OFFSET_DEG  = -90.0f;
-static const float PITCH_MOUNT_OFFSET_DEG = -90.0f;
+static const float ROLL_MOUNT_OFFSET_DEG  = -80.0f;
+static const float PITCH_MOUNT_OFFSET_DEG = -80.0f;
 
 // ---------------------- App timing ------------------------------------
 static const uint16_t SAMPLE_MS = 20; // 50 Hz
@@ -182,30 +188,64 @@ void setup() {
     }
 }
 
+// Returns the equivalent of `target` that is within [-180, +180] of `reference`,
+// so the motor always takes the short arc and never spins through zero.
+static float shortestPath(float target, float reference) {
+    float delta = target - reference;
+    while (delta >  180.0f) delta -= 360.0f;
+    while (delta < -180.0f) delta += 360.0f;
+    return reference + delta;
+}
+
 void loop() {
     static uint32_t t0 = millis();
+    static float filtered_roll  = 0.0f;
+    static float prev_roll_err  = 0.0f;
+    static float filtered_deriv = 0.0f;
+    static bool  imu_seeded     = false;
+    static uint32_t prev_ms     = millis();
+
+    // Shortest-path state for wrapping fix
+    static float cmd_roll  = ROLL_MOUNT_OFFSET_DEG;
+    static float cmd_pitch = PITCH_MOUNT_OFFSET_DEG;
 
     float roll = 0, pitch = 0, yaw = 0, acc = 0;
     if (sense.readOrientation(roll, pitch, yaw, acc)) {
-        // Negate to counteract the measured tilt.
-        // Flip signs here if a motor runs in the wrong direction.
-        float roll_target  = -roll;
-        float pitch_target = -pitch;
+        uint32_t now_ms = millis();
+        float dt = (now_ms - prev_ms) / 1000.0f;
+        if (dt < 0.001f) dt = 0.001f;
+        prev_ms = now_ms;
 
-        // Hard clamp — never exceed ±GIMBAL_MAX_DEG regardless of IMU reading.
+        // EMA low-pass on IMU input — eliminates high-freq noise before PD sees it.
+        if (!imu_seeded) { filtered_roll = roll; imu_seeded = true; }
+        filtered_roll = IMU_ALPHA * roll + (1.0f - IMU_ALPHA) * filtered_roll;
+
+        // PD control on filtered roll.
+        float roll_err  = -filtered_roll;
+        float raw_deriv = (roll_err - prev_roll_err) / dt;
+        filtered_deriv  = DERIV_ALPHA * raw_deriv + (1.0f - DERIV_ALPHA) * filtered_deriv;
+        float roll_target = ROLL_KP * roll_err + ROLL_KD * filtered_deriv;
+        prev_roll_err = roll_err;
+
+        float pitch_target = 0.0f; // pitch control disabled
+
+        // Hard clamp — never exceed ±GIMBAL_MAX_DEG.
         if (roll_target  >  GIMBAL_MAX_DEG) roll_target  =  GIMBAL_MAX_DEG;
         if (roll_target  < -GIMBAL_MAX_DEG) roll_target  = -GIMBAL_MAX_DEG;
-        if (pitch_target >  GIMBAL_MAX_DEG) pitch_target =  GIMBAL_MAX_DEG;
-        if (pitch_target < -GIMBAL_MAX_DEG) pitch_target = -GIMBAL_MAX_DEG;
 
-        // Apply mechanical mounting offset so motor encoder zero aligns with level.
+        // Apply mounting offset then resolve to shortest arc from last command.
         roll_target  += ROLL_MOUNT_OFFSET_DEG;
         pitch_target += PITCH_MOUNT_OFFSET_DEG;
+        roll_target  = shortestPath(roll_target,  cmd_roll);
+        pitch_target = shortestPath(pitch_target, cmd_pitch);
+        cmd_roll  = roll_target;
+        cmd_pitch = pitch_target;
 
         sendAbsPosition(MOTOR_ROLL,  roll_target,  GIMBAL_MAX_DPS);
         sendAbsPosition(MOTOR_PITCH, pitch_target, GIMBAL_MAX_DPS);
 
-        Serial0.printf("IMU  roll=%+7.2f  pitch=%+7.2f  yaw=%+7.2f\n", roll, pitch, yaw);
+        Serial0.printf("IMU  roll=%+7.2f (f=%+6.2f)  pitch=%+7.2f  yaw=%+7.2f\n",
+                       roll, filtered_roll, pitch, yaw);
         Serial0.printf("CMD  roll=%+7.2f  pitch=%+7.2f\n", roll_target, pitch_target);
     } else {
         Serial0.println("[WARN] No IMU data — stopping motors");
