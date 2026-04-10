@@ -27,13 +27,13 @@ static const uint8_t CMD_MOTOR_STOP    = 0x81;
 // ---------------------- Gimbal speed limit ----------------------------
 // Max speed the PID output can ever request (deg/s).
 // Start conservative; raise once direction/response is confirmed.
-static const float GIMBAL_MAX_DPS = 10.0f;
+static const float GIMBAL_MAX_DPS = 50.0f;
 
 // ---------------------- PID gains -------------------------------------
 // Roll
-static const float ROLL_KP = 12.0f;
-static const float ROLL_KI = 0.01f;
-static const float ROLL_KD = 6.0f;
+static const float ROLL_KP = 2.0f;
+static const float ROLL_KI = 0.00f;
+static const float ROLL_KD = 0.2f;
 
 // Pitch
 static const float PITCH_KP = 0.30f;
@@ -41,9 +41,9 @@ static const float PITCH_KI = 0.00f;
 static const float PITCH_KD = 0.08f;
 
 // ---------------------- Controller tuning constants -------------------
-static const float DERIV_ALPHA        = 0.10f;  // EMA smoothing on derivative term
-static const float IMU_ALPHA          = 0.10f;  // EMA smoothing on IMU angle input
-static const float ERROR_DEADZONE_DEG = 0.60f;  // errors smaller than this are zeroed
+static const float DERIV_ALPHA        = 0.30f;  // EMA smoothing on derivative term
+static const float IMU_ALPHA          = 0.3f;  // EMA smoothing on IMU angle input
+static const float ERROR_DEADZONE_DEG = 0.30f;  // errors smaller than this are zeroed
 static const float SETPOINT_RAMP_DPS  = 20.0f;  // max setpoint change rate (deg/s)
 static const float MAX_INTEGRATOR     =  30.0f;
 static const float MIN_INTEGRATOR     = -30.0f;
