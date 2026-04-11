@@ -25,34 +25,36 @@ static const uint8_t CMD_SPEED_CONTROL = 0xA2;
 static const uint8_t CMD_MOTOR_STOP    = 0x81;
 
 // ---------------------- Gimbal speed limit ----------------------------
-// Max speed the PID output can ever request (deg/s).
-// Start conservative; raise once direction/response is confirmed.
-static const float GIMBAL_MAX_DPS = 50.0f;
+static const float GIMBAL_MAX_DPS = 200.0f;
 
 // ---------------------- PID gains -------------------------------------
-// Roll
-static const float ROLL_KP = 2.0f;
-static const float ROLL_KI = 0.00f;
-static const float ROLL_KD = 0.2f;
+// Tuning order:
+//   1. Raise ROLL_KP until fast response, just before oscillation starts
+//   2. Add small ROLL_KI to eliminate steady-state offset
+//   3. Add ROLL_KD last to damp overshoot — re-enable below when ready
+//
+// Roll (pitch disabled until roll is tuned)
+static const float ROLL_KP = 8.0f;
+static const float ROLL_KI = 0.1f;
+static const float ROLL_KD = 0.0f;   // re-enable after KP confirmed stable
 
-// Pitch
+// Pitch — inactive, kept for reference
 static const float PITCH_KP = 0.30f;
 static const float PITCH_KI = 0.00f;
-static const float PITCH_KD = 0.08f;
+static const float PITCH_KD = 0.00f;
 
 // ---------------------- Controller tuning constants -------------------
-static const float DERIV_ALPHA        = 0.30f;  // EMA smoothing on derivative term
-static const float IMU_ALPHA          = 0.3f;  // EMA smoothing on IMU angle input
-static const float ERROR_DEADZONE_DEG = 0.30f;  // errors smaller than this are zeroed
-static const float SETPOINT_RAMP_DPS  = 20.0f;  // max setpoint change rate (deg/s)
-static const float MAX_INTEGRATOR     =  30.0f;
-static const float MIN_INTEGRATOR     = -30.0f;
+// EMA smoothing on the derivative term
+static const float DERIV_ALPHA        = 0.30f;
 
-// Desired angles (0 = level)
-static const float ROLL_SETPOINT_DEG  = 0.0f;
-static const float PITCH_SETPOINT_DEG = 0.0f;
+// Deadzone — tight so small corrections aren't suppressed.
+static const float ERROR_DEADZONE_DEG = 0.05f;
 
-// Per-axis speed clamps (can be tightened independently)
+// Integrator clamp — small so KI can't wind too far while tuning.
+static const float MAX_INTEGRATOR     =  10.0f;
+static const float MIN_INTEGRATOR     = -10.0f;
+
+// Per-axis speed clamps
 static const float ROLL_MAX_DPS  = GIMBAL_MAX_DPS;
 static const float PITCH_MAX_DPS = GIMBAL_MAX_DPS;
 
@@ -61,8 +63,10 @@ static const float ROLL_CMD_SIGN  =  1.0f;
 static const float PITCH_CMD_SIGN =  1.0f;
 
 // ---------------------- Loop timing -----------------------------------
-static const uint16_t SAMPLE_MS   = 40; // 25 Hz control loop
-static const uint8_t  PRINT_EVERY =  1; // serial print every N loops
+// 100 Hz — consumes every BNO085 sample (IMU reports at 100 Hz).
+// PRINT_EVERY=2 → 50 Hz log rate to keep serial from overwhelming the plotter.
+static const uint16_t SAMPLE_MS   = 10;
+static const uint8_t  PRINT_EVERY =  2;
 
 // ---------------------- State flags -----------------------------------
 static bool can_ok = false;
@@ -70,19 +74,14 @@ static bool imu_ok = false;
 
 // ---------------------- Data structures -------------------------------
 struct AxisController {
-    // Gains
     float kp;
     float ki;
     float kd;
-    // Configuration
-    float setpoint_deg;
     float max_dps;
     float cmd_sign;
-    // Runtime state (zero-initialised then seeded on first IMU reading)
-    float filtered_measurement_deg;
-    float smooth_setpoint_deg;
+    // Runtime state
     float integrator;
-    float prev_measurement_deg;
+    float prev_error_deg;  // previous error for derivative
     float deriv_filtered;
     bool  seeded;
 };
@@ -94,6 +93,58 @@ struct MotorStatus {
     bool  valid     = false;
 };
 
+// ---------------------- Quaternion helpers ----------------------------
+
+struct Quat { float w, x, y, z; };
+
+static Quat quatConj(const Quat& q) {
+    return { q.w, -q.x, -q.y, -q.z };
+}
+
+static Quat quatMul(const Quat& p, const Quat& q) {
+    return {
+        p.w*q.w - p.x*q.x - p.y*q.y - p.z*q.z,
+        p.w*q.x + p.x*q.w + p.y*q.z - p.z*q.y,
+        p.w*q.y - p.x*q.z + p.y*q.w + p.z*q.x,
+        p.w*q.z + p.x*q.y - p.y*q.x + p.z*q.w
+    };
+}
+
+// Extract roll and pitch error (deg) from quaternion error.
+// q_err = conj(q_target) ⊗ q_current
+// For identity target (level): q_err = q_current.
+// BNO085 axis mapping: i → X = roll,  j → Y = pitch.
+// If IMU is rotated, swap nx/ny or negate as needed.
+static void quatErrorToRollPitch(const Quat& q_current,
+                                 const Quat& q_target,
+                                 float& roll_err_deg,
+                                 float& pitch_err_deg)
+{
+    Quat q_err = quatMul(quatConj(q_target), q_current);
+
+    float w = q_err.w;
+    if (w >  1.0f) w =  1.0f;
+    if (w < -1.0f) w = -1.0f;
+
+    float half_angle = acosf(w);
+    float sin_ha     = sinf(half_angle);
+
+    const float RAD2DEG = 57.2957795f;
+
+    if (sin_ha < 1e-6f) {
+        roll_err_deg  = 0.0f;
+        pitch_err_deg = 0.0f;
+        return;
+    }
+
+    float nx        = q_err.x / sin_ha;
+    float ny        = q_err.y / sin_ha;
+    float angle_deg = 2.0f * half_angle * RAD2DEG;
+
+    roll_err_deg  = nx * angle_deg;
+    pitch_err_deg = ny * angle_deg;
+}
+
 // ---------------------- TWAI helpers ----------------------------------
 static bool twai_send_frame(uint32_t id, const uint8_t data[8]) {
     twai_message_t msg = {};
@@ -104,7 +155,6 @@ static bool twai_send_frame(uint32_t id, const uint8_t data[8]) {
     return twai_transmit(&msg, pdMS_TO_TICKS(5)) == ESP_OK;
 }
 
-// Drain one reply frame matching wantID; ignores frames for other IDs.
 static bool twai_recv_frame(uint32_t wantID, twai_message_t &out, uint32_t timeout_ms = 20) {
     uint32_t deadline = millis() + timeout_ms;
     while (millis() < deadline) {
@@ -120,14 +170,6 @@ static bool twai_recv_frame(uint32_t wantID, twai_message_t &out, uint32_t timeo
 }
 
 // ---------------------- Motor commands --------------------------------
-// Send 0xA2 Speed Closed-Loop Control command.
-//
-// speed_dps  : desired shaft speed in deg/s (signed).
-// Protocol   : speedControl is int32_t, unit = 0.01 dps/LSB
-//              → wire value = speed_dps * 100
-//
-// The reply frame contains torque, speed, and angle, so this call
-// also serves as the status read — no separate 0x9C poll needed.
 static MotorStatus sendSpeedCommand(uint8_t id, float speed_dps) {
     int32_t sc = (int32_t)lroundf(speed_dps * 100.0f);
     uint8_t tx[8] = {
@@ -140,15 +182,15 @@ static MotorStatus sendSpeedCommand(uint8_t id, float speed_dps) {
     twai_send_frame(TX_BASE + id, tx);
 
     twai_message_t rx;
-    if (!twai_recv_frame(RX_BASE + id, rx, 15) || rx.data[0] != CMD_SPEED_CONTROL) {
-        return {}; // valid = false
+    // 35 ms timeout — more headroom than original 15 ms to reduce dropouts
+    if (!twai_recv_frame(RX_BASE + id, rx, 35) || rx.data[0] != CMD_SPEED_CONTROL) {
+        return {};
     }
 
     MotorStatus s;
-    // DATA[1] = temperature (int8_t, 1 °C/LSB) — available if needed
-    s.torque_A  = (int16_t)(rx.data[2] | (rx.data[3] << 8)) * 0.01f; // 0.01 A/LSB
-    s.speed_dps = (float)  (int16_t)(rx.data[4] | (rx.data[5] << 8)); // 1 dps/LSB
-    s.angle_deg = (float)  (int16_t)(rx.data[6] | (rx.data[7] << 8)); // 1 deg/LSB
+    s.torque_A  = (int16_t)(rx.data[2] | (rx.data[3] << 8)) * 0.01f;
+    s.speed_dps = (float)  (int16_t)(rx.data[4] | (rx.data[5] << 8));
+    s.angle_deg = (float)  (int16_t)(rx.data[6] | (rx.data[7] << 8));
     s.valid     = true;
     return s;
 }
@@ -188,73 +230,45 @@ static void can_init() {
 }
 
 // ---------------------- PID controller --------------------------------
-static float stepTowards(float current, float target, float max_step) {
-    float delta = target - current;
-    if      (delta >  max_step) return current + max_step;
-    else if (delta < -max_step) return current - max_step;
-    return target;
+
+static void seedAxis(AxisController &axis) {
+    axis.integrator     = 0.0f;
+    axis.prev_error_deg = 0.0f;
+    axis.deriv_filtered = 0.0f;
+    axis.seeded         = true;
 }
 
-// Seed controller state from the first real IMU reading to prevent
-// a startup transient.
-static void seedAxis(AxisController &axis, float measurement_deg) {
-    axis.filtered_measurement_deg = measurement_deg;
-    axis.smooth_setpoint_deg      = measurement_deg;
-    axis.prev_measurement_deg     = measurement_deg;
-    axis.deriv_filtered           = 0.0f;
-    axis.integrator               = 0.0f;
-    axis.seeded                   = true;
-}
-
-// Run one PID step. Returns a speed command in deg/s.
+// One PID step.
 //
-// The PID error (degrees off level) drives the speed demand directly:
-//   large error  → fast correction
-//   small error  → slow correction
-//   zero error   → motor commanded to 0 dps (holds position via motor's
-//                  own closed-loop speed control at 0)
+// Error pipeline:
+//   raw quat error → EMA smooth (ERROR_ALPHA) → deadzone → P + I + D → clamp
 //
-// This is the correct architecture for a stabilising gimbal: the outer
-// (attitude) loop runs here, and the motor's inner speed loop executes
-// the commanded rate.
-static float updateAxisSpeed(AxisController &axis, float measurement_deg, float dt) {
-    if (!axis.seeded) {
-        seedAxis(axis, measurement_deg);
-    }
+// Derivative is computed on the smoothed error and then EMA-smoothed
+// again (DERIV_ALPHA) before adding to output. This double-smoothing
+// makes D usable at 100 Hz without amplifying IMU noise.
+static float updateAxisSpeed(AxisController &axis, float error_deg, float dt) {
+    if (!axis.seeded) seedAxis(axis);
 
-    // EMA filter on raw IMU angle
-    axis.filtered_measurement_deg =
-        IMU_ALPHA * measurement_deg + (1.0f - IMU_ALPHA) * axis.filtered_measurement_deg;
-
-    // Soft-ramp the setpoint to avoid step-demand transients
-    const float max_step = SETPOINT_RAMP_DPS * dt;
-    axis.smooth_setpoint_deg =
-        stepTowards(axis.smooth_setpoint_deg, axis.setpoint_deg, max_step);
-
-    // Error with deadzone
-    float error_deg = axis.smooth_setpoint_deg - axis.filtered_measurement_deg;
+    // Deadzone
     if (fabsf(error_deg) < ERROR_DEADZONE_DEG) error_deg = 0.0f;
 
-    // Integrator with anti-windup clamp
+    // Integrator with anti-windup
     axis.integrator += error_deg * dt;
     if (axis.integrator >  MAX_INTEGRATOR) axis.integrator =  MAX_INTEGRATOR;
     if (axis.integrator <  MIN_INTEGRATOR) axis.integrator =  MIN_INTEGRATOR;
 
-    // Derivative on measurement (not error) to avoid setpoint-kick
-    float raw_deriv =
-        -(axis.filtered_measurement_deg - axis.prev_measurement_deg) /
-         (dt > 0.001f ? dt : 0.001f);
+    // Derivative on error, EMA-smoothed
+    float safe_dt   = dt > 0.001f ? dt : 0.001f;
+    float raw_deriv = (error_deg - axis.prev_error_deg) / safe_dt;
     axis.deriv_filtered =
         DERIV_ALPHA * raw_deriv + (1.0f - DERIV_ALPHA) * axis.deriv_filtered;
-    axis.prev_measurement_deg = axis.filtered_measurement_deg;
+    axis.prev_error_deg = error_deg;
 
-    // PID output → speed in deg/s
     float speed_dps =
         axis.kp * error_deg +
         axis.ki * axis.integrator +
         axis.kd * axis.deriv_filtered;
 
-    // Apply direction sign and clamp to per-axis maximum
     speed_dps *= axis.cmd_sign;
     if (speed_dps >  axis.max_dps) speed_dps =  axis.max_dps;
     if (speed_dps < -axis.max_dps) speed_dps = -axis.max_dps;
@@ -266,7 +280,7 @@ static float updateAxisSpeed(AxisController &axis, float measurement_deg, float 
 void setup() {
     Serial0.begin(115200);
     delay(100);
-    Serial0.println("\n[BOOT] ESP32-C3 Gimbal Controller (speed-control mode)");
+    Serial0.println("\n[BOOT] ESP32-C3 Gimbal Controller (quaternion error, roll-only)");
 
     led.begin();
     led.setBrightness(128);
@@ -283,22 +297,32 @@ void setup() {
     can_init();
 
     if (imu_ok && can_ok) {
-        led.setPixelColor(0, led.Color(20, 255, 20)); // green — all systems go
+        // Block until roll motor replies — prevents control loop from running
+        // before the motor is powered and ready, which would seed the
+        // integrator with stale error and cause a lurch on first response.
+        Serial0.println("[BOOT] Waiting for roll motor...");
+        while (true) {
+            MotorStatus s = sendSpeedCommand(MOTOR_ROLL, 0.0f);
+            if (s.valid) break;
+            delay(100);
+        }
+        Serial0.println("[OK] Roll motor ready");
+
+        led.setPixelColor(0, led.Color(20, 255, 20));
         led.show();
         Serial0.println("[LED] Green: system OK");
     } else {
-        led.setPixelColor(0, led.Color(255, 0, 0)); // red — init error
+        led.setPixelColor(0, led.Color(255, 0, 0));
         led.show();
         Serial0.println("[LED] Red: init error — check IMU/CAN wiring");
     }
 
-    // Print CSV header for serial plotter / logging
     Serial0.println(
         "TUNE,time_ms"
-        ",roll_raw,roll_filt,roll_cmd_dps,roll_err"
-        ",pitch_raw,pitch_filt,pitch_cmd_dps,pitch_err"
-        ",roll_mot_angle,roll_mot_speed"
-        ",pitch_mot_angle,pitch_mot_speed"
+        ",roll_approx_deg,roll_err_deg,roll_cmd_dps"
+        ",pitch_approx_deg,pitch_err_deg,pitch_cmd_dps"
+        ",roll_mot_speed,roll_mot_angle"
+        ",pitch_mot_speed,pitch_mot_angle"
     );
 }
 
@@ -308,71 +332,72 @@ void loop() {
     static uint32_t prev_ms  = millis();
     static uint32_t loop_seq = 0;
 
+    // Identity quaternion = level target (zero roll, zero pitch, any yaw)
+    static const Quat Q_TARGET = { 1.0f, 0.0f, 0.0f, 0.0f };
+
     static AxisController roll_axis = {
         ROLL_KP, ROLL_KI, ROLL_KD,
-        ROLL_SETPOINT_DEG,
-        ROLL_MAX_DPS,
-        ROLL_CMD_SIGN,
-        /*filtered_measurement_deg*/ 0.0f,
-        /*smooth_setpoint_deg*/      0.0f,
-        /*integrator*/               0.0f,
-        /*prev_measurement_deg*/     0.0f,
-        /*deriv_filtered*/           0.0f,
-        /*seeded*/                   false
+        ROLL_MAX_DPS, ROLL_CMD_SIGN,
+        /*integrator*/     0.0f,
+        /*prev_error_deg*/ 0.0f,
+        /*deriv_filtered*/ 0.0f,
+        /*seeded*/         false
     };
 
     static AxisController pitch_axis = {
         PITCH_KP, PITCH_KI, PITCH_KD,
-        PITCH_SETPOINT_DEG,
-        PITCH_MAX_DPS,
-        PITCH_CMD_SIGN,
-        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false
+        PITCH_MAX_DPS, PITCH_CMD_SIGN,
+        0.0f, 0.0f, 0.0f, false
     };
 
-    float roll = 0.0f, pitch = 0.0f, yaw = 0.0f, acc = 0.0f;
+    float qr = 0.0f, qi = 0.0f, qj = 0.0f, qk = 0.0f, acc = 0.0f;
 
-    if (sense.readOrientation(roll, pitch, yaw, acc)) {
+    if (sense.getQuaternion(qr, qi, qj, qk, acc)) {
         uint32_t now_ms = millis();
         float dt = (now_ms - prev_ms) / 1000.0f;
         if (dt < 0.001f) dt = 0.001f;
         prev_ms = now_ms;
 
-        // Compute speed demands
-        float roll_dps  = updateAxisSpeed(roll_axis,  roll,  dt);
-        float pitch_dps = updateAxisSpeed(pitch_axis, pitch, dt);
+        Quat q_current = { qr, qi, qj, qk };
 
-        // Send speed commands — reply gives feedback at no extra cost
+        float roll_err_deg  = 0.0f;
+        float pitch_err_deg = 0.0f;
+        quatErrorToRollPitch(q_current, Q_TARGET, roll_err_deg, pitch_err_deg);
+
+        // Roll PID active — pitch locked at 0 until roll is tuned
+        float roll_dps  = updateAxisSpeed(roll_axis, roll_err_deg, dt);
+        float pitch_dps = 0.0f;
+
         MotorStatus roll_fb  = sendSpeedCommand(MOTOR_ROLL,  roll_dps);
-        MotorStatus pitch_fb = sendSpeedCommand(MOTOR_PITCH, 0);
+        MotorStatus pitch_fb = sendSpeedCommand(MOTOR_PITCH, 0.0f);
 
-        // Serial telemetry (CSV, compatible with Serial Plotter)
         if ((loop_seq++ % PRINT_EVERY) == 0) {
-            float roll_err  = roll_axis.smooth_setpoint_deg  - roll_axis.filtered_measurement_deg;
-            float pitch_err = pitch_axis.smooth_setpoint_deg - pitch_axis.filtered_measurement_deg;
+            const float RAD2DEG = 57.2957795f;
+            float roll_approx  = 2.0f * qi * RAD2DEG;
+            float pitch_approx = 2.0f * qj * RAD2DEG;
 
             Serial0.printf(
                 "TUNE,%lu"
-                ",%.3f,%.3f,%.3f,%.3f"
-                ",%.3f,%.3f,%.3f,%.3f"
+                ",%.3f,%.3f,%.3f"
+                ",%.3f,%.3f,%.3f"
                 ",%.1f,%.1f"
                 ",%.1f,%.1f\n",
                 (unsigned long)now_ms,
-                roll,  roll_axis.filtered_measurement_deg,  roll_dps,  roll_err,
-                pitch, pitch_axis.filtered_measurement_deg, pitch_dps, pitch_err,
-                roll_fb.valid  ? roll_fb.angle_deg  : 0.0f,
+                roll_approx,  roll_err_deg,  roll_dps,
+                pitch_approx, pitch_err_deg, pitch_dps,
                 roll_fb.valid  ? roll_fb.speed_dps  : 0.0f,
-                pitch_fb.valid ? pitch_fb.angle_deg : 0.0f,
-                pitch_fb.valid ? pitch_fb.speed_dps : 0.0f
+                roll_fb.valid  ? roll_fb.angle_deg  : 0.0f,
+                pitch_fb.valid ? pitch_fb.speed_dps : 0.0f,
+                pitch_fb.valid ? pitch_fb.angle_deg : 0.0f
             );
         }
     } else {
-        // No IMU data — stop both motors immediately
         Serial0.println("[WARN] No IMU data — stopping motors");
         motorStop(MOTOR_ROLL);
         motorStop(MOTOR_PITCH);
     }
 
-    // Fixed-rate loop pacing at SAMPLE_MS (25 Hz)
+    // Fixed-rate loop pacing at 100 Hz
     uint32_t now  = millis();
     uint32_t next = t0 + SAMPLE_MS;
     if (now < next) delay(next - now);

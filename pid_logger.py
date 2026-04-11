@@ -1,19 +1,3 @@
-"""
-gimbal_pid_plotter.py
----------------------
-High-performance real-time scrolling plotter for the ESP32-C3 gimbal.
-Uses pyqtgraph (OpenGL-accelerated) — handles 60 fps easily.
-
-Usage:
-    python gimbal_pid_plotter.py              # COM9, 115200 baud
-    python gimbal_pid_plotter.py COM3
-    python gimbal_pid_plotter.py COM9 500000
-
-Requirements:
-    pip install pyserial pyqtgraph PyQt6
-    (or PyQt5:  pip install pyserial pyqtgraph PyQt5)
-"""
-
 import sys
 import threading
 import collections
@@ -25,22 +9,25 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore
 
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 PORT     = sys.argv[1] if len(sys.argv) > 1 else "COM9"
 BAUD     = int(sys.argv[2]) if len(sys.argv) > 2 else 115200
 WINDOW   = 300   # samples visible (~12 s at 25 Hz)
-LOG_FILE = f"gimbal_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+# LOG_FILE = f"gimbal_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+LOG_FILE = f"gimbal_log.csv" 
 
-# ─── Column order (matches firmware TUNE line) ────────────────────────────────
 
 HEADERS = [
     "time_ms",
-    "roll_raw",        "roll_filt",      "roll_cmd_dps",  "roll_err",
-    "pitch_raw",       "pitch_filt",     "pitch_cmd_dps", "pitch_err",
-    "roll_mot_angle",  "roll_mot_speed",
-    "pitch_mot_angle", "pitch_mot_speed",
+    "roll_approx_deg",  "roll_err_deg",   "roll_cmd_dps",
+    "pitch_approx_deg", "pitch_err_deg",  "pitch_cmd_dps",
+    "roll_mot_speed",   "roll_mot_angle",
+    "pitch_mot_speed",  "pitch_mot_angle",
 ]
+
+EXPECTED_PARTS = 1 + len(HEADERS)   # "TUNE" + 11 values = 12
 
 # ─── Ring buffers (one per channel) ──────────────────────────────────────────
 
@@ -68,7 +55,7 @@ def serial_reader():
 
         while running:
             try:
-                raw  = ser.readline()
+                raw = ser.readline()
                 if not raw:
                     continue
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -77,7 +64,7 @@ def serial_reader():
                     continue
 
                 parts = line.split(",")
-                if len(parts) != 14:
+                if len(parts) != EXPECTED_PARTS:
                     continue
 
                 try:
@@ -145,14 +132,14 @@ def make_plot(row, col, title, ylabel, yrange, legend_items):
     return curves
 
 
-# Row 0 — angles
-roll_angle_curves  = make_plot(0, 0, "ROLL — angle (deg)",  "deg", (-45,  45), [
-    ("raw",      "#4fc3f788", 1.0, "solid"),
-    ("filtered", "#00e5ff",   1.8, "solid"),
+# Row 0 — angles (approx from quaternion small-angle + quaternion error)
+roll_angle_curves  = make_plot(0, 0, "ROLL — angle (deg)",  "deg", (-45, 45), [
+    ("approx (2·qi)", "#4fc3f788", 1.0, "solid"),
+    ("quat error",    "#00e5ff",   1.8, "solid"),
 ])
-pitch_angle_curves = make_plot(0, 1, "PITCH — angle (deg)", "deg", (-45,  45), [
-    ("raw",      "#ce93d888", 1.0, "solid"),
-    ("filtered", "#ea80fc",   1.8, "solid"),
+pitch_angle_curves = make_plot(0, 1, "PITCH — angle (deg)", "deg", (-45, 45), [
+    ("approx (2·qj)", "#ce93d888", 1.0, "solid"),
+    ("quat error",    "#ea80fc",   1.8, "solid"),
 ])
 
 # Row 1 — speeds
@@ -166,14 +153,14 @@ pitch_speed_curves = make_plot(1, 1, "PITCH — speed (dps)", "dps", (-110, 110)
 ])
 
 # Row 2 — errors
-roll_err_curves  = make_plot(2, 0, "ROLL — error (deg)",  "deg", (-25, 25), [
+roll_err_curves  = make_plot(2, 0, "ROLL — quat error (deg)",  "deg", (-25, 25), [
     ("error", "#ef5350", 1.8, "solid"),
 ])
-pitch_err_curves = make_plot(2, 1, "PITCH — error (deg)", "deg", (-25, 25), [
+pitch_err_curves = make_plot(2, 1, "PITCH — quat error (deg)", "deg", (-25, 25), [
     ("error", "#f06292", 1.8, "solid"),
 ])
 
-# Status bar below the plot grid
+# Status bar
 status_label = QtWidgets.QLabel(f"  Connecting to {PORT}…   |   log: {LOG_FILE}")
 status_label.setStyleSheet(
     "color:#6666aa; background:#0d0d1a; font-size:11px; padding:3px 8px;"
@@ -190,7 +177,7 @@ root.resize(1400, 890)
 root.show()
 
 
-# ─── Qt timer drives all UI updates (no threading conflict with Qt) ───────────
+# ─── Qt timer drives all UI updates ──────────────────────────────────────────
 
 def update():
     if not new_data.is_set():
@@ -198,32 +185,32 @@ def update():
     new_data.clear()
 
     with lock:
-        r_raw  = np.array(bufs["roll_raw"],        dtype=np.float32)
-        r_filt = np.array(bufs["roll_filt"],        dtype=np.float32)
-        r_cmd  = np.array(bufs["roll_cmd_dps"],     dtype=np.float32)
-        r_mspd = np.array(bufs["roll_mot_speed"],   dtype=np.float32)
-        r_err  = np.array(bufs["roll_err"],         dtype=np.float32)
+        r_approx = np.array(bufs["roll_approx_deg"],  dtype=np.float32)
+        r_err    = np.array(bufs["roll_err_deg"],      dtype=np.float32)
+        r_cmd    = np.array(bufs["roll_cmd_dps"],      dtype=np.float32)
+        r_mspd   = np.array(bufs["roll_mot_speed"],    dtype=np.float32)
 
-        p_raw  = np.array(bufs["pitch_raw"],        dtype=np.float32)
-        p_filt = np.array(bufs["pitch_filt"],       dtype=np.float32)
-        p_cmd  = np.array(bufs["pitch_cmd_dps"],    dtype=np.float32)
-        p_mspd = np.array(bufs["pitch_mot_speed"],  dtype=np.float32)
-        p_err  = np.array(bufs["pitch_err"],        dtype=np.float32)
+        p_approx = np.array(bufs["pitch_approx_deg"], dtype=np.float32)
+        p_err    = np.array(bufs["pitch_err_deg"],     dtype=np.float32)
+        p_cmd    = np.array(bufs["pitch_cmd_dps"],     dtype=np.float32)
+        p_mspd   = np.array(bufs["pitch_mot_speed"],   dtype=np.float32)
 
-    roll_angle_curves[0].setData(x, r_raw)
-    roll_angle_curves[1].setData(x, r_filt)
+    # Row 0 — angles
+    roll_angle_curves[0].setData(x, r_approx)
+    roll_angle_curves[1].setData(x, r_err)
 
+    pitch_angle_curves[0].setData(x, p_approx)
+    pitch_angle_curves[1].setData(x, p_err)
+
+    # Row 1 — speeds
     roll_speed_curves[0].setData(x, r_cmd)
     roll_speed_curves[1].setData(x, r_mspd)
-
-    roll_err_curves[0].setData(x, r_err)
-
-    pitch_angle_curves[0].setData(x, p_raw)
-    pitch_angle_curves[1].setData(x, p_filt)
 
     pitch_speed_curves[0].setData(x, p_cmd)
     pitch_speed_curves[1].setData(x, p_mspd)
 
+    # Row 2 — errors
+    roll_err_curves[0].setData(x, r_err)
     pitch_err_curves[0].setData(x, p_err)
 
     status_label.setText(
@@ -236,7 +223,7 @@ def update():
 
 timer = QtCore.QTimer()
 timer.timeout.connect(update)
-timer.start(16)   # 60 fps UI cap; serial thread fills the buffer independently
+timer.start(16)   # ~60 fps UI cap; serial thread fills buffer independently
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
