@@ -33,15 +33,15 @@ static const float GIMBAL_MAX_DPS = 200.0f;
 //   2. Add small ROLL_KI to eliminate steady-state offset
 //   3. Add ROLL_KD last to damp overshoot — re-enable below when ready
 //
-// Roll (pitch disabled until roll is tuned)
-static const float ROLL_KP = 8.0f;
-static const float ROLL_KI = 0.1f;
-static const float ROLL_KD = 0.0f;   // re-enable after KP confirmed stable
+// Roll
+static const float ROLL_KP = 2.0f;
+static const float ROLL_KI = 0.0f;
+static const float ROLL_KD = 0.1f;
 
-// Pitch — inactive, kept for reference
-static const float PITCH_KP = 0.30f;
-static const float PITCH_KI = 0.00f;
-static const float PITCH_KD = 0.00f;
+// Pitch
+static const float PITCH_KP = 0.8f;
+static const float PITCH_KI = 0.0f;
+static const float PITCH_KD = 0.01f;
 
 // ---------------------- Controller tuning constants -------------------
 // EMA smoothing on the derivative term
@@ -59,7 +59,7 @@ static const float ROLL_MAX_DPS  = GIMBAL_MAX_DPS;
 static const float PITCH_MAX_DPS = GIMBAL_MAX_DPS;
 
 // Flip to -1.0f if an axis responds in the wrong direction
-static const float ROLL_CMD_SIGN  =  1.0f;
+static const float ROLL_CMD_SIGN  = -1.0f;
 static const float PITCH_CMD_SIGN =  1.0f;
 
 // ---------------------- Loop timing -----------------------------------
@@ -110,6 +110,12 @@ static Quat quatMul(const Quat& p, const Quat& q) {
     };
 }
 
+static float wrapDeg180(float deg) {
+    while (deg >  180.0f) deg -= 360.0f;
+    while (deg < -180.0f) deg += 360.0f;
+    return deg;
+}
+
 // Extract roll and pitch error (deg) from quaternion error.
 // q_err = conj(q_target) ⊗ q_current
 // For identity target (level): q_err = q_current.
@@ -121,6 +127,15 @@ static void quatErrorToRollPitch(const Quat& q_current,
                                  float& pitch_err_deg)
 {
     Quat q_err = quatMul(quatConj(q_target), q_current);
+
+    // q and -q represent the same attitude. Keep the positive hemisphere so
+    // axis-angle error always uses the shortest rotation near 180 deg.
+    if (q_err.w < 0.0f) {
+        q_err.w = -q_err.w;
+        q_err.x = -q_err.x;
+        q_err.y = -q_err.y;
+        q_err.z = -q_err.z;
+    }
 
     float w = q_err.w;
     if (w >  1.0f) w =  1.0f;
@@ -141,8 +156,8 @@ static void quatErrorToRollPitch(const Quat& q_current,
     float ny        = q_err.y / sin_ha;
     float angle_deg = 2.0f * half_angle * RAD2DEG;
 
-    roll_err_deg  = nx * angle_deg;
-    pitch_err_deg = ny * angle_deg;
+    roll_err_deg  = wrapDeg180(nx * angle_deg);
+    pitch_err_deg = wrapDeg180(ny * angle_deg);
 }
 
 // ---------------------- TWAI helpers ----------------------------------
@@ -280,7 +295,7 @@ static float updateAxisSpeed(AxisController &axis, float error_deg, float dt) {
 void setup() {
     Serial0.begin(115200);
     delay(100);
-    Serial0.println("\n[BOOT] ESP32-C3 Gimbal Controller (quaternion error, roll-only)");
+    Serial0.println("\n[BOOT] ESP32-C3 Gimbal Controller (quaternion error, roll+pitch)");
 
     led.begin();
     led.setBrightness(128);
@@ -297,16 +312,17 @@ void setup() {
     can_init();
 
     if (imu_ok && can_ok) {
-        // Block until roll motor replies — prevents control loop from running
+        // Block until both motors reply — prevents control loop from running
         // before the motor is powered and ready, which would seed the
         // integrator with stale error and cause a lurch on first response.
-        Serial0.println("[BOOT] Waiting for roll motor...");
+        Serial0.println("[BOOT] Waiting for roll/pitch motors...");
         while (true) {
-            MotorStatus s = sendSpeedCommand(MOTOR_ROLL, 0.0f);
-            if (s.valid) break;
+            MotorStatus roll = sendSpeedCommand(MOTOR_ROLL, 0.0f);
+            MotorStatus pitch = sendSpeedCommand(MOTOR_PITCH, 0.0f);
+            if (roll.valid && pitch.valid) break;
             delay(100);
         }
-        Serial0.println("[OK] Roll motor ready");
+        Serial0.println("[OK] Roll/pitch motors ready");
 
         led.setPixelColor(0, led.Color(20, 255, 20));
         led.show();
@@ -364,12 +380,12 @@ void loop() {
         float pitch_err_deg = 0.0f;
         quatErrorToRollPitch(q_current, Q_TARGET, roll_err_deg, pitch_err_deg);
 
-        // Roll PID active — pitch locked at 0 until roll is tuned
+        // Roll and pitch PID active
         float roll_dps  = updateAxisSpeed(roll_axis, roll_err_deg, dt);
-        float pitch_dps = 0.0f;
+        float pitch_dps = updateAxisSpeed(pitch_axis, pitch_err_deg, dt);
 
         MotorStatus roll_fb  = sendSpeedCommand(MOTOR_ROLL,  roll_dps);
-        MotorStatus pitch_fb = sendSpeedCommand(MOTOR_PITCH, 0.0f);
+        MotorStatus pitch_fb = sendSpeedCommand(MOTOR_PITCH, pitch_dps);
 
         if ((loop_seq++ % PRINT_EVERY) == 0) {
             const float RAD2DEG = 57.2957795f;
