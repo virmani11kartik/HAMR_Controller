@@ -34,14 +34,14 @@ static const float GIMBAL_MAX_DPS = 200.0f;
 //   3. Add ROLL_KD last to damp overshoot — re-enable below when ready
 //
 // Roll
-static const float ROLL_KP = 2.0f;
-static const float ROLL_KI = 0.0f;
-static const float ROLL_KD = 0.1f;
+static const float ROLL_KP = 8.0f;
+static const float ROLL_KI = 0.1f;
+static const float ROLL_KD = 2.0f;
 
 // Pitch
 static const float PITCH_KP = 0.8f;
 static const float PITCH_KI = 0.0f;
-static const float PITCH_KD = 0.01f;
+static const float PITCH_KD = 0.1f;
 
 // ---------------------- Controller tuning constants -------------------
 // EMA smoothing on the derivative term
